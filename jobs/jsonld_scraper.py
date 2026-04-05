@@ -2,12 +2,17 @@
 Job: JSON-LD Product Page Scraper
 Stáhne sitemap product feedy, naparsuje JSON-LD Product schema, upsertne do DB.
 Interval: denně (cron: 30 6,18 * * *)
+
+Rate limiting: max 5 concurrent workers, 0.2s delay between requests.
+Full feed download — but polite (won't DDoS target shops).
 """
 import sys
 import json
 import re
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from threading import Lock
 
 import requests
 
@@ -17,12 +22,32 @@ from jobs.db import upsert_product_with_offer, get_conn
 USER_AGENT_PRODUCT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
 USER_AGENT_BOT = "Mozilla/5.0 (compatible; Googlebot/2.1)"
 MAX_PRODUCTS_PER_SHOP = 50000  # Full download — Neon Launch plan (10 GB) handles it
+MAX_WORKERS = 5                # Polite: max 5 concurrent requests (not 10)
+REQUEST_DELAY = 0.2            # 200ms between requests per worker = ~25 req/s total
+MAX_TOTAL_PRODUCTS = 500000    # Safety cap per run
+
+# Run metrics
+_metrics_lock = Lock()
+_run_metrics = {
+    "run_id": str(uuid.uuid4())[:8],
+    "shops_targeted": 0,
+    "shops_success": 0,
+    "shops_failed": 0,
+    "urls_fetched": 0,
+    "products_found": 0,
+    "products_saved": 0,
+    "errors_total": 0,
+    "shop_details": [],
+}
 
 
 def fetch(url, ua=USER_AGENT_PRODUCT, timeout=12):
-    """Simple curl-like fetch with UA."""
+    """Simple curl-like fetch with UA + polite delay."""
+    time.sleep(REQUEST_DELAY)  # Rate limit: don't DDoS shops
     try:
         r = requests.get(url, headers={"User-Agent": ua}, timeout=timeout, allow_redirects=True)
+        with _metrics_lock:
+            _run_metrics["urls_fetched"] += 1
         return r.text if r.status_code == 200 else None
     except Exception:
         return None
@@ -141,6 +166,7 @@ def volume_ml_from_title(title):
 
 def scrape_shop(shop_id, domain, feed_url, country_id):
     """Scrape all products from a shop. Returns count saved."""
+    shop_start = time.time()
     print(f"[{domain}] Starting scrape...", flush=True)
 
     urls = get_product_urls_from_sitemap(feed_url)
@@ -148,12 +174,13 @@ def scrape_shop(shop_id, domain, feed_url, country_id):
         print(f"[{domain}] No product URLs found in sitemap", flush=True)
         return 0
 
-    print(f"[{domain}] Found {len(urls)} product URLs", flush=True)
+    print(f"[{domain}] Found {len(urls):,} product URLs (cap: {MAX_PRODUCTS_PER_SHOP:,})", flush=True)
 
     saved = 0
     errors = 0
+    found = 0
 
-    with ThreadPoolExecutor(max_workers=10) as executor:
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         futures = {executor.submit(extract_product, url): url for url in urls}
         for future in as_completed(futures):
             try:
@@ -175,8 +202,67 @@ def scrape_shop(shop_id, domain, feed_url, country_id):
                 if errors < 5:
                     print(f"[{domain}] Error: {e}", flush=True)
 
-    print(f"[{domain}] Saved {saved}/{len(urls)} (errors: {errors})", flush=True)
+    shop_duration = time.time() - shop_start
+    hit_rate = saved / max(len(urls), 1) * 100
+    speed = len(urls) / max(shop_duration, 0.1)
+
+    print(f"[{domain}] Saved {saved}/{len(urls):,} ({hit_rate:.0f}%) "
+          f"| {shop_duration:.1f}s | {speed:.1f} pages/s | errors: {errors}", flush=True)
+
+    # Track per-shop metrics
+    with _metrics_lock:
+        _run_metrics["products_saved"] += saved
+        _run_metrics["errors_total"] += errors
+        if saved > 0:
+            _run_metrics["shops_success"] += 1
+        else:
+            _run_metrics["shops_failed"] += 1
+        _run_metrics["shop_details"].append({
+            "shop_id": shop_id,
+            "domain": domain,
+            "urls": len(urls),
+            "saved": saved,
+            "errors": errors,
+            "duration_s": round(shop_duration, 1),
+            "hit_rate_pct": round(hit_rate, 1),
+            "pages_per_s": round(speed, 1),
+        })
+
     return saved
+
+
+def save_run_metrics(duration_seconds):
+    """Save run metrics to scrape_run_metrics table."""
+    try:
+        from jobs.db import get_conn
+        import json as _json
+        conn = get_conn()
+        cur = conn.cursor()
+        m = _run_metrics
+        hit_rate = m["products_saved"] / max(m["urls_fetched"], 1) * 100
+        cur.execute("""
+            INSERT INTO scrape_run_metrics (
+                run_id, scraper, started_at, duration_seconds,
+                shops_targeted, shops_success, shops_failed,
+                urls_fetched, products_saved, errors_total,
+                hit_rate, shop_details
+            ) VALUES (
+                %s, 'jsonld_scraper', NOW() - interval '%s seconds', %s,
+                %s, %s, %s, %s, %s, %s, %s, %s
+            )
+        """, (
+            m["run_id"], int(duration_seconds), round(duration_seconds, 2),
+            m["shops_targeted"], m["shops_success"], m["shops_failed"],
+            m["urls_fetched"], m["products_saved"], m["errors_total"],
+            round(hit_rate, 2),
+            _json.dumps(m["shop_details"]),
+        ))
+        conn.commit()
+        cur.close()
+        conn.close()
+        print(f"Run metrics saved (run_id={m['run_id']})", flush=True)
+    except Exception as e:
+        print(f"Failed to save run metrics: {e}", flush=True)
 
 
 def main():
@@ -184,18 +270,29 @@ def main():
     print(f"=== JSONLD Scraper starting at {time.strftime('%Y-%m-%d %H:%M:%S')} ===", flush=True)
 
     shops = get_shops_to_scrape()
+    _run_metrics["shops_targeted"] = len(shops)
     print(f"Found {len(shops)} shops to scrape", flush=True)
 
     total_saved = 0
-    for shop_id, domain, feed_url, country_id in shops:
+    for i, (shop_id, domain, feed_url, country_id) in enumerate(shops, 1):
         try:
+            print(f"\n--- [{i}/{len(shops)}] {domain} ---", flush=True)
             saved = scrape_shop(shop_id, domain, feed_url, country_id)
             total_saved += saved
         except Exception as e:
             print(f"[{domain}] Shop-level error: {e}", flush=True)
 
     elapsed = time.time() - start_ts
-    print(f"=== Done: {total_saved} products saved in {elapsed:.1f}s ===", flush=True)
+    urls_total = _run_metrics["urls_fetched"]
+    speed = urls_total / max(elapsed, 1)
+
+    print(f"\n{'='*60}", flush=True)
+    print(f"DONE: {total_saved:,} products saved from {_run_metrics['shops_success']}/{len(shops)} shops", flush=True)
+    print(f"URLs fetched: {urls_total:,} | Duration: {elapsed:.0f}s ({elapsed/60:.1f}m) | Speed: {speed:.1f} pages/s", flush=True)
+    print(f"Errors: {_run_metrics['errors_total']}", flush=True)
+
+    # Save metrics to DB
+    save_run_metrics(elapsed)
 
 
 if __name__ == "__main__":

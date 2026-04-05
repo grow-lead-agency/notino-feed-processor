@@ -14,3 +14,6 @@
 
 # Job 5: Cleanup starých cache souborů (>7 dní)
 0 2 * * * find /app/cache -mtime +7 -delete >> /app/logs/cleanup.log 2>&1
+
+# Job 6: Firecrawl scraper for hard/protected shops — 1× denně v noci
+0 3 * * * python /app/jobs/firecrawl_scraper.py >> /app/logs/firecrawl_scraper.log 2>&1

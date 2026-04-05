@@ -16,9 +16,10 @@ Běží na Coolify (growlead-node-03). Zapisuje do Neon PG `notino-datamining`.
 | Job | Soubor | Interval | Co dělá |
 |---|---|---|---|
 | Sitemap crawler | `jobs/sitemap_crawler.py` | 6h | Stahuje sitemap XML z 316 shopů, parsuje product URLs |
-| JSON-LD scraper | `jobs/jsonld_scraper.py` | denně 2:00 | Curl product pages, extrahuje JSON-LD Product schema |
+| JSON-LD scraper | `jobs/jsonld_scraper.py` | denně 2:00 | Curl product pages, extrahuje JSON-LD Product schema (easy/medium shopy) |
 | Hlídač Shopů | `jobs/hlidac_shopu.py` | denně 4:00 | Volá API `api.hlidacshopu.cz/v2/detail` pro CZ/SK price history |
 | Affiliate feeds | `jobs/affiliate_feeds.py` | 6h | Stahuje Awin/CJ XML feedy (DISABLED — čeká na registraci) |
+| Firecrawl scraper | `jobs/firecrawl_scraper.py` | denně 3:00 | Managed scraping přes Firecrawl API — hard shopy s CF challenge/DataDome, source='firecrawl_jsonld' |
 | Sitemap diff | integrováno v sitemap_crawler | denně | Detekuje nové/smazané produkty |
 
 ## Deploy
@@ -40,6 +41,7 @@ curl -s "$COOLIFY_API_URL/api/v1/deploy?uuid=rtgj2inqwjjsms4ifgfh5a05" \
 | `DATABASE_URL` | Neon PG connection string |
 | `LOG_LEVEL` | INFO / DEBUG |
 | `AWIN_API_KEY` | Awin publisher API key (prázdný, čeká na registraci) |
+| `FIRECRAWL_API_KEY` | Firecrawl API key pro hard/protected shopy (CF challenge, DataDome) |
 
 ## Lokální vývoj
 

@@ -26,6 +26,8 @@ services:
       # Affiliate APIs (optional — activate after registration)
       - AWIN_API_KEY=${AWIN_API_KEY:-}
       - CJ_API_KEY=${CJ_API_KEY:-}
+      # Firecrawl managed scraping (hard/protected shops — CF challenge, DataDome)
+      - FIRECRAWL_API_KEY=${FIRECRAWL_API_KEY:-}
       # Logging
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - PYTHONUNBUFFERED=1

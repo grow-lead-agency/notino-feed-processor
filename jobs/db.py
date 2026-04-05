@@ -50,27 +50,67 @@ def extract_volume(title: str) -> tuple:
     return m.group(0), volume_ml
 
 
+def get_or_create_brand(cur, brand_name: str) -> int | None:
+    """Find or create brand by name. Returns brand_id or None."""
+    if not brand_name or not brand_name.strip():
+        return None
+    brand_name = brand_name.strip()
+    brand_normalized = normalize_title(brand_name)
+    slug = re.sub(r"[^a-z0-9]+", "-", brand_normalized).strip("-")
+
+    cur.execute("SELECT id FROM brands WHERE slug = %s", (slug,))
+    row = cur.fetchone()
+    if row:
+        return row[0]
+
+    cur.execute(
+        "INSERT INTO brands (name, name_normalized, slug) VALUES (%s, %s, %s) "
+        "ON CONFLICT (slug) DO UPDATE SET name = EXCLUDED.name RETURNING id",
+        (brand_name, brand_normalized, slug)
+    )
+    return cur.fetchone()[0]
+
+
 def upsert_product(*, gtin13=None, gtin12=None, mpn=None, title,
-                   description=None, image_url=None, first_seen_shop_id=None, raw_data=None):
-    """UPSERT product into catalog. Returns product_id."""
+                   description=None, image_url=None, first_seen_shop_id=None,
+                   brand_name=None, raw_data=None):
+    """UPSERT product into catalog. Auto-creates brand. Returns product_id."""
     title_normalized = normalize_title(title)
     volume_str, volume_ml = extract_volume(title)
 
     with get_conn() as conn:
         with conn.cursor() as cur:
+            # Auto-create brand
+            brand_id = get_or_create_brand(cur, brand_name)
+
             # Match by GTIN first
             if gtin13:
                 cur.execute("SELECT id FROM products WHERE gtin13 = %s", (gtin13,))
                 row = cur.fetchone()
                 if row:
-                    cur.execute("UPDATE products SET last_updated_at = NOW() WHERE id = %s", (row[0],))
+                    # Update brand_id + image if missing
+                    cur.execute(
+                        """UPDATE products SET last_updated_at = NOW(),
+                           brand_id = COALESCE(brand_id, %s),
+                           canonical_image_url = COALESCE(canonical_image_url, %s)
+                           WHERE id = %s""",
+                        (brand_id, image_url, row[0])
+                    )
+                    conn.commit()
                     return row[0]
 
             if gtin12:
                 cur.execute("SELECT id FROM products WHERE gtin12 = %s", (gtin12,))
                 row = cur.fetchone()
                 if row:
-                    cur.execute("UPDATE products SET last_updated_at = NOW() WHERE id = %s", (row[0],))
+                    cur.execute(
+                        """UPDATE products SET last_updated_at = NOW(),
+                           brand_id = COALESCE(brand_id, %s),
+                           canonical_image_url = COALESCE(canonical_image_url, %s)
+                           WHERE id = %s""",
+                        (brand_id, image_url, row[0])
+                    )
+                    conn.commit()
                     return row[0]
 
             if mpn and first_seen_shop_id:
@@ -82,18 +122,19 @@ def upsert_product(*, gtin13=None, gtin12=None, mpn=None, title,
                 if row:
                     return row[0]
 
-            # Insert new
+            # Insert new product with brand
             cur.execute(
                 """
                 INSERT INTO products (
                     gtin13, gtin12, mpn, title, title_normalized, description,
                     volume_ml, volume_unit_raw, canonical_image_url,
-                    first_seen_shop_id, raw_feed_data
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    brand_id, first_seen_shop_id, raw_feed_data
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING id
                 """,
                 (gtin13, gtin12, mpn, title, title_normalized, description,
-                 volume_ml, volume_str, image_url, first_seen_shop_id,
+                 volume_ml, volume_str, image_url,
+                 brand_id, first_seen_shop_id,
                  json.dumps(raw_data) if raw_data else None)
             )
             product_id = cur.fetchone()[0]
@@ -211,6 +252,7 @@ def upsert_product_with_offer(*, shop_id, country_id, product_data):
         title=product_data["name"],
         description=product_data.get("description"),
         image_url=product_data.get("image_url"),
+        brand_name=product_data.get("brand"),
         first_seen_shop_id=shop_id,
         raw_data=product_data.get("raw"),
     )

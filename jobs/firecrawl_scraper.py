@@ -34,8 +34,8 @@ FIRECRAWL_API_KEY = os.environ.get("FIRECRAWL_API_KEY", "").strip()
 
 USER_AGENT_BOT = "Mozilla/5.0 (compatible; Googlebot/2.1)"
 
-MAX_PRODUCTS_PER_SHOP = 50          # Firecrawl costs — lower cap per shop
-MAX_REQUESTS_PER_RUN = 500          # Hard budget cap (safety)
+MAX_PRODUCTS_PER_SHOP = 500         # Firecrawl costs — controlled per shop
+MAX_REQUESTS_PER_RUN = 2000         # Hard budget cap (safety) — ~$20 per run
 MAX_CONCURRENT_WORKERS = 10         # Firecrawl API rate limit
 FIRECRAWL_TIMEOUT_SECONDS = 60      # stealth scrapes are slow
 FIRECRAWL_MAX_RETRIES = 2           # retry on 429 / transient 5xx

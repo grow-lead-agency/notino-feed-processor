@@ -3,7 +3,6 @@ Job: JSON-LD Product Page Scraper
 Stáhne sitemap product feedy, naparsuje JSON-LD Product schema, upsertne do DB.
 Interval: denně (cron: 30 6,18 * * *)
 """
-import os
 import sys
 import json
 import re
@@ -17,7 +16,7 @@ from jobs.db import upsert_product_with_offer, get_conn
 
 USER_AGENT_PRODUCT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
 USER_AGENT_BOT = "Mozilla/5.0 (compatible; Googlebot/2.1)"
-MAX_PRODUCTS_PER_SHOP = 200
+MAX_PRODUCTS_PER_SHOP = 50000  # Full download — Neon Launch plan (10 GB) handles it
 
 
 def fetch(url, ua=USER_AGENT_PRODUCT, timeout=12):

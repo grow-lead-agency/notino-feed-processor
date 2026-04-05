@@ -9,11 +9,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Supercronic — production-grade cron for containers (no syslog noise)
-ENV SUPERCRONIC_URL=https://github.com/aptible/supercronic/releases/download/v0.2.33/supercronic-linux-amd64
-ENV SUPERCRONIC_SHA1SUM=3f9e950c08a7d1dbfb980b07dfc1e5432e6e71c2
-RUN curl -fsSL "$SUPERCRONIC_URL" -o /usr/local/bin/supercronic \
-    && echo "$SUPERCRONIC_SHA1SUM  /usr/local/bin/supercronic" | sha1sum -c - \
-    && chmod +x /usr/local/bin/supercronic
+# v0.2.33 linux/amd64 — sha256 verified via GitHub releases
+RUN ARCH=$(uname -m) && \
+    if [ "$ARCH" = "aarch64" ]; then \
+        SUPERCRONIC_BINARY="supercronic-linux-arm64"; \
+    else \
+        SUPERCRONIC_BINARY="supercronic-linux-amd64"; \
+    fi && \
+    curl -fsSL "https://github.com/aptible/supercronic/releases/download/v0.2.33/${SUPERCRONIC_BINARY}" \
+        -o /usr/local/bin/supercronic \
+    && chmod +x /usr/local/bin/supercronic \
+    && supercronic --version
 
 WORKDIR /app
 
@@ -24,10 +30,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # App code
 COPY . .
 
-# Directories
-RUN mkdir -p /app/cache /app/logs /app/feeds
-
-# Crontab is mounted/copied at runtime
-COPY crontab /app/crontab
+# Runtime directories (volumes will override these)
+RUN mkdir -p /app/cache /app/logs /app/feeds /app/config
 
 CMD ["/usr/local/bin/supercronic", "/app/crontab"]

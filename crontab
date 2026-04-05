@@ -1,0 +1,16 @@
+# notino-feed-processor crontab (supercronic format)
+# 
+# Job 1: Sitemap XML feeds — 316 shopů, heavy, 1x za 6 hodin
+0 */6 * * * python /app/jobs/sitemap_crawler.py >> /app/logs/sitemap_crawler.log 2>&1
+
+# Job 2: JSON-LD product pages — 30+ shopů, 2x denně  
+30 6,18 * * * python /app/jobs/jsonld_scraper.py >> /app/logs/jsonld_scraper.log 2>&1
+
+# Job 3: Affiliate XML feeds (Awin/CJ) — po registraci aktivovat
+# 0 4 * * * python /app/jobs/affiliate_feeds.py >> /app/logs/affiliate_feeds.log 2>&1
+
+# Job 4: Hlídač Shopů API — price history, 4x denně
+0 */6 * * * python /app/jobs/hlidac_shopu.py >> /app/logs/hlidac_shopu.log 2>&1
+
+# Job 5: Cleanup starých cache souborů (>7 dní)
+0 2 * * * find /app/cache -mtime +7 -delete >> /app/logs/cleanup.log 2>&1

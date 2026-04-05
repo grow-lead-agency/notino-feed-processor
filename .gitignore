@@ -7,3 +7,6 @@ cache/
 logs/
 feeds/
 config/
+backups/
+__pycache__/
+*.pyc

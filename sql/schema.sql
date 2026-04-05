@@ -1,44 +1,35 @@
--- notino-datamining schema
--- Run once on Neon DB (neondb)
+-- notino-datamining schema addons
+-- Neon DB: neondb (ep-soft-forest-agqhbeg0.c-2.eu-central-1.aws.neon.tech)
+--
+-- Existing tables (from main project, DO NOT recreate):
+--   products, product_url_queue, price_history, competitors, brands,
+--   affiliate_networks, affiliate_programs, product_categories, etc.
+--
+-- This file adds only the tables needed by notino-feed-processor.
+-- Run: psql "$DATABASE_URL" -f sql/schema.sql
 
-CREATE TABLE IF NOT EXISTS products (
+-- Crawl run log
+CREATE TABLE IF NOT EXISTS sitemap_crawl_log (
     id          BIGSERIAL PRIMARY KEY,
-    url         TEXT NOT NULL UNIQUE,
     shop        TEXT NOT NULL,
-    title       TEXT,
-    price       NUMERIC(12,2),
-    currency    VARCHAR(3) DEFAULT 'CZK',
-    image_url   TEXT,
-    scraped_at  TIMESTAMPTZ DEFAULT NOW(),
-    raw_json    JSONB,
-    created_at  TIMESTAMPTZ DEFAULT NOW()
+    sitemap_url TEXT NOT NULL,
+    crawled_at  TIMESTAMPTZ DEFAULT NOW(),
+    urls_found  INTEGER DEFAULT 0,
+    success     BOOLEAN DEFAULT TRUE,
+    error_msg   TEXT
 );
+CREATE INDEX IF NOT EXISTS idx_crawl_log_shop ON sitemap_crawl_log(shop, crawled_at DESC);
 
-CREATE INDEX IF NOT EXISTS idx_products_shop ON products(shop);
-CREATE INDEX IF NOT EXISTS idx_products_scraped_at ON products(scraped_at DESC);
-
-CREATE TABLE IF NOT EXISTS product_url_queue (
+-- Hlídač Shopů API results (standalone, no FK)
+CREATE TABLE IF NOT EXISTS hlidac_shopu_data (
     id            BIGSERIAL PRIMARY KEY,
-    url           TEXT NOT NULL UNIQUE,
-    shop          TEXT NOT NULL,
-    discovered_at TIMESTAMPTZ DEFAULT NOW(),
-    processed_at  TIMESTAMPTZ,
-    status        TEXT DEFAULT 'pending' CHECK (status IN ('pending', 'done', 'error'))
-);
-
-CREATE INDEX IF NOT EXISTS idx_queue_shop_status ON product_url_queue(shop, status);
-
-CREATE TABLE IF NOT EXISTS price_history (
-    id           BIGSERIAL PRIMARY KEY,
-    product_url  TEXT NOT NULL,
-    fetched_at   TIMESTAMPTZ DEFAULT NOW(),
-    min_price    NUMERIC(12,2),
-    max_price    NUMERIC(12,2),
+    product_url   TEXT NOT NULL,
+    fetched_at    TIMESTAMPTZ DEFAULT NOW(),
+    min_price     NUMERIC(12,2),
+    max_price     NUMERIC(12,2),
     current_price NUMERIC(12,2),
-    currency     VARCHAR(3) DEFAULT 'CZK',
-    raw_json     JSONB,
-    UNIQUE (product_url, (fetched_at::date))
+    currency      VARCHAR(3) DEFAULT 'CZK',
+    raw_json      JSONB
 );
-
-CREATE INDEX IF NOT EXISTS idx_price_history_url ON price_history(product_url);
-CREATE INDEX IF NOT EXISTS idx_price_history_fetched ON price_history(fetched_at DESC);
+CREATE INDEX IF NOT EXISTS idx_hlidac_url ON hlidac_shopu_data(product_url);
+CREATE INDEX IF NOT EXISTS idx_hlidac_fetched ON hlidac_shopu_data(fetched_at DESC);

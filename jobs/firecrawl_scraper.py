@@ -392,7 +392,6 @@ def get_shops_to_scrape() -> list[tuple]:
         FROM website_checks wc
         JOIN competitors c ON c.id = wc.competitor_id
         WHERE wc.sitemap_product_feed IS NOT NULL
-          AND wc.price_source IN ('jsonld', 'microdata')
           AND c.country_id IS NOT NULL
           AND (
               wc.difficulty = ANY(%s)

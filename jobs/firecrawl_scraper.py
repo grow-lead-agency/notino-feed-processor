@@ -105,12 +105,36 @@ def firecrawl_scrape(url: str) -> dict | None:
         print("[firecrawl] FATAL: FIRECRAWL_API_KEY env var missing", flush=True)
         return None
 
+    # Primary: AI extraction via jsonOptions (works on JS-rendered SPAs)
+    # Fallback: HTML for JSON-LD parsing
+    product_schema = {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string", "description": "Product name/title"},
+            "brand": {"type": "string", "description": "Brand name"},
+            "price": {"type": "number", "description": "Current price as number"},
+            "sale_price": {"type": "number", "description": "Sale price if discounted"},
+            "currency": {"type": "string", "description": "Currency code (EUR, CZK, PLN...)"},
+            "availability": {"type": "string", "description": "in_stock, out_of_stock, or preorder"},
+            "ean": {"type": "string", "description": "EAN/GTIN barcode (13, 12, or 8 digits)"},
+            "sku": {"type": "string", "description": "Product SKU/model number"},
+            "image_url": {"type": "string", "description": "Main product image URL"},
+            "description": {"type": "string", "description": "Short product description"},
+            "volume_ml": {"type": "number", "description": "Volume in ml if applicable"},
+        },
+        "required": ["name", "price"],
+    }
+
     payload = {
         "url": url,
-        "formats": ["html"],
+        "formats": ["json", "html"],
+        "jsonOptions": {
+            "schema": product_schema,
+            "prompt": "Extract product information from this e-commerce page.",
+        },
         "proxy": "stealth",
         "onlyMainContent": False,
-        "waitFor": 1500,
+        "waitFor": 2000,
         "timeout": FIRECRAWL_TIMEOUT_SECONDS * 1000,
     }
     headers = {
@@ -256,8 +280,64 @@ def parse_jsonld_product(html: str, url: str) -> dict | None:
 # ----------------------------------------------------------------------------
 # Per-URL worker
 # ----------------------------------------------------------------------------
+def parse_ai_extraction(json_data: dict, url: str) -> dict | None:
+    """Parse Firecrawl's AI-extracted JSON into our product schema."""
+    if not json_data or not isinstance(json_data, dict):
+        return None
+
+    name = (json_data.get("name") or "").strip()
+    price = json_data.get("price")
+
+    # Must have name + price
+    if not name or price is None:
+        return None
+
+    try:
+        price_val = float(price)
+    except (TypeError, ValueError):
+        return None
+
+    sale_price = json_data.get("sale_price")
+    try:
+        sale_price_val = float(sale_price) if sale_price else None
+    except (TypeError, ValueError):
+        sale_price_val = None
+
+    # Availability normalization
+    availability_raw = str(json_data.get("availability") or "").lower()
+    if "in_stock" in availability_raw or "instock" in availability_raw or "available" in availability_raw:
+        availability = "InStock"
+    elif "out" in availability_raw or "sold" in availability_raw:
+        availability = "OutOfStock"
+    elif "preorder" in availability_raw:
+        availability = "PreOrder"
+    else:
+        availability = availability_raw or "InStock"
+
+    return {
+        "name": name,
+        "brand": str(json_data.get("brand") or ""),
+        "sku": str(json_data.get("sku") or ""),
+        "ean": str(json_data.get("ean") or ""),
+        "price": price_val,
+        "sale_price": sale_price_val,
+        "currency": (json_data.get("currency") or "EUR").upper(),
+        "availability": availability,
+        "image_url": str(json_data.get("image_url") or ""),
+        "description": (str(json_data.get("description") or ""))[:500],
+        "volume_ml": json_data.get("volume_ml"),
+        "url": url,
+        "source": "firecrawl_jsonld",
+        "raw": json_data if len(json.dumps(json_data)) < 5000 else None,
+    }
+
+
 def extract_product(url: str) -> dict | None:
-    """Fetch product page via Firecrawl + parse JSON-LD Product schema."""
+    """
+    Fetch product page via Firecrawl.
+    Primary: AI extraction via jsonOptions (works on JS SPAs).
+    Fallback: JSON-LD parsing from HTML.
+    """
     if not _budget_consume():
         return None
 
@@ -265,6 +345,14 @@ def extract_product(url: str) -> dict | None:
     if not data:
         return None
 
+    # Try AI extraction first (most reliable for JS-rendered pages)
+    json_extracted = data.get("json")
+    if json_extracted:
+        result = parse_ai_extraction(json_extracted, url)
+        if result and result.get("name") and result.get("price") is not None:
+            return result
+
+    # Fallback: JSON-LD from HTML
     html = data.get("html") or data.get("rawHtml") or ""
     return parse_jsonld_product(html, url)
 

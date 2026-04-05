@@ -38,15 +38,15 @@ services:
       - feed-processor-feeds:/app/feeds
       - feed-processor-config:/app/config
 
-    # Resource limits — 1 CPU, 2GB RAM per spec
+    # Resource limits — node-03 has 8 cores, 15 GB RAM, plenty of headroom
     deploy:
       resources:
         limits:
-          cpus: "1.0"
-          memory: 2G
+          cpus: "4.0"
+          memory: 4G
         reservations:
-          cpus: "0.1"
-          memory: 256M
+          cpus: "0.5"
+          memory: 512M
 
     healthcheck:
       test: ["CMD", "python", "-c", "import psycopg2; import os; psycopg2.connect(os.environ['DATABASE_URL'])"]

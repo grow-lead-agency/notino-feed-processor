@@ -46,6 +46,20 @@
 # Legal entity scraper — every 6h (+30m offset), batch of 50 shops
 45 */6 * * * flock -n /tmp/legal_scraper.lock python /app/jobs/legal_scraper.py >> /proc/1/fd/1 2>&1
 
+# ── SITEMAP URL TYPE SCRAPERS (dequeue from url_discovery_queue) ───
+
+# Brand page scraper — every 2h, batch 100 (Crawl4AI + HTTP fallback)
+# Dequeues url_type='brand' → shop_brand_pages, auto-matches to brands master
+30 */2 * * * flock -n /tmp/brand_page_scraper.lock python /app/jobs/brand_page_scraper.py >> /proc/1/fd/1 2>&1
+
+# Blog/article scraper — every 6h, batch 200 (Crawl4AI + HTTP fallback)
+# Dequeues url_type='blog' → shop_blog_articles (topics, brand mentions, sentiment)
+0 */6 * * * flock -n /tmp/blog_scraper.lock python /app/jobs/blog_scraper.py >> /proc/1/fd/1 2>&1
+
+# CMS page scraper — every 4h, batch 200 (plain HTTP, shallow meta extraction)
+# Dequeues url_type='page' → shop_pages, classifies + routes to domain tables
+15 */4 * * * flock -n /tmp/cms_page_scraper.lock python /app/jobs/cms_page_scraper.py >> /proc/1/fd/1 2>&1
+
 # ── ENRICHMENT JOBS (DB-only, free) ────────────────────────────────
 
 # Offer enrichment — batch SQL updates, every 6h after new data lands
@@ -73,6 +87,10 @@
 # ── DISABLED (waiting for setup) ───────────────────────────────────
 # Affiliate XML feeds — aktivovat po Awin/CJ registraci
 # 0 */4 * * * python /app/jobs/affiliate_feeds.py >> /proc/1/fd/1 2>&1
+
+# ── OBSERVABILITY ──────────────────────────────────────────────────
+# Langfuse → Neon cost exporter — every 15 min, exports last 2h of AI cost data
+*/15 * * * * flock -n /tmp/langfuse_exporter.lock python /app/jobs/langfuse_exporter.py --hours 2 >> /proc/1/fd/1 2>&1
 
 # ── MAINTENANCE ────────────────────────────────────────────────────
 # Redis backup — daily RDB snapshot

@@ -451,7 +451,22 @@ def scrape_shop(shop_id: int, domain: str, feed_url: str, country_id: int) -> in
                 if errors < 5:
                     print(f"[{domain}] Error: {e}", flush=True)
 
-    print(f"[{domain}] Saved {saved}/{len(urls)} (errors: {errors})", flush=True)
+    print(f"[{domain}] Saved {saved}/{len(urls)} (errors: {errors}, ~{len(urls)} credits)", flush=True)
+
+    # Write to firecrawl_usage table
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO firecrawl_usage (shop_domain, credits_used, pages_scraped, pages_success, cost_usd)
+            VALUES (%s, %s, %s, %s, %s)
+        """, (domain, len(urls), len(urls), saved, round(len(urls) * 0.01, 4)))
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception as e:
+        print(f"[{domain}] Failed to log cost: {e}", flush=True)
+
     return saved
 
 

@@ -17,7 +17,7 @@ import signal
 import threading
 
 sys.path.insert(0, "/app")
-from jobs.queue import (
+from jobs.job_queue import (
     get_redis, dequeue, complete, fail, recover_stalled,
     get_stats, renew_lock, promote_delayed, DEFAULT_LOCK_TTL_S,
 )

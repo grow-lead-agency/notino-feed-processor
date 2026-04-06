@@ -1,8 +1,8 @@
-"""Tests for jobs/queue.py — uses real Redis (localhost or Docker)."""
+"""Tests for jobs/job_queue.py — uses real Redis (localhost or Docker)."""
 import time
 import pytest
 
-from jobs.queue import (
+from jobs.job_queue import (
     create_job,
     enqueue,
     enqueue_bulk,

@@ -552,7 +552,7 @@ def main():
 
     else:
         print(f"Unknown command: {cmd}")
-        print("Usage: queue.py [schedule|stats|waiting|dead|recover|flush]")
+        print("Usage: job_queue.py [schedule|stats|waiting|dead|recover|flush]")
 
 
 if __name__ == "__main__":

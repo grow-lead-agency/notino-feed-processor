@@ -21,8 +21,8 @@ Běží na Coolify (growlead-node-03). Zapisuje do Neon PG `notino-datamining`.
 | Hlídač Shopů | `jobs/hlidac_shopu.py` | každé 4h | **Dual flow:** (1) Price sync pro CZ/SK hard/blocked shopy → `product_offers` + `offer_price_history`, (2) Enrichment → `hlidac_shopu_data`. Free alternative to Firecrawl. Max 500 URLs/run, 200ms rate limit. |
 | Affiliate feeds | `jobs/affiliate_feeds.py` | 6h | Stahuje Awin/CJ XML feedy (DISABLED — čeká na registraci) |
 | Firecrawl scraper | `jobs/firecrawl_scraper.py` | denně 3:00 | Managed scraping přes Firecrawl API — hard shopy s CF challenge/DataDome, source='firecrawl_jsonld' |
-| Shipping scraper | `jobs/shipping_scraper.py` | hodinově :15 | Scrape shipping info stránek — extrahuje shipping_zones + shipping_methods přes Firecrawl AI extraction. Batch 20 shopů/run. |
-| Legal scraper | `jobs/legal_scraper.py` | hodinově :45 | Scrape imprint stránek — extrahuje legal_name, VAT ID, IČO přes Firecrawl AI extraction. Batch 20 shopů/run. |
+| Shipping scraper | `jobs/shipping_scraper.py` | hodinově :15 | Scrape shipping info stránek — extrahuje shipping_zones + shipping_methods. Engine: Crawl4AI → Firecrawl fallback. Batch 50 shopů/run. |
+| Legal scraper | `jobs/legal_scraper.py` | hodinově :45 | Scrape imprint stránek — extrahuje legal_name, VAT ID, IČO. Engine: Crawl4AI → Firecrawl fallback. Batch 50 shopů/run. |
 | Sitemap diff | integrováno v sitemap_crawler | denně | Detekuje nové/smazané produkty |
 
 ## Deploy
@@ -46,7 +46,9 @@ curl -s "$COOLIFY_API_URL/api/v1/deploy?uuid=rtgj2inqwjjsms4ifgfh5a05" \
 | `REDIS_URL` | Redis connection string — automaticky nastaven na Coolify Redis (viz níže) |
 | `LOG_LEVEL` | INFO / DEBUG |
 | `AWIN_API_KEY` | Awin publisher API key (prázdný, čeká na registraci) |
-| `FIRECRAWL_API_KEY` | Firecrawl API key pro hard/protected shopy (CF challenge, DataDome) |
+| `FIRECRAWL_API_KEY` | Firecrawl API key pro hard/protected shopy (CF challenge, DataDome) — fallback only |
+| `CRAWL4AI_URL` | Crawl4AI self-hosted URL (default: `http://crawl4ai:11235`) — primary scraping engine |
+| `OPENAI_API_KEY` | OpenAI API key pro Crawl4AI LLM extraction (gpt-4o-mini) |
 
 ## Redis (Coolify-managed)
 

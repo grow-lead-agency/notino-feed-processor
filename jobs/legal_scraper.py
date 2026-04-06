@@ -1,17 +1,21 @@
 """
 Job: Legal Entity Scraper
 Cíl: scrape imprint / impressum / kontakt / "o nás" stránky ze shopů bez legal_checked_at.
-Extrahuje legal_name, VAT ID, company registration number, address přes Firecrawl AI extraction.
+Extrahuje legal_name, VAT ID, company registration number, address přes LLM AI extraction.
+
+Engine priority:
+  1. Crawl4AI (self-hosted, $0) — default
+  2. Firecrawl (cloud API, paid) — fallback pokud Crawl4AI selže nebo není dostupný
 
 Workflow:
   1. SELECT shops WHERE legal_checked_at IS NULL AND deleted_at IS NULL
   2. Discover imprint page URL — zkusit známé patterns (/impressum, /kontakt, /o-nas...)
-  3. POST Firecrawl /v1/scrape s jsonOptions schema (legal_name, vat, reg number, address)
+  3. Scrape via Crawl4AI (→ fallback Firecrawl) s JSON schema (legal_name, vat, reg number, address)
   4. Match existing legal_entity by vat_id OR (reg_number + country) OR legal_name
   5. UPSERT legal_entity + link shops.legal_entity_id
   6. UPDATE shops SET legal_checked_at = NOW()
 
-Cron: hodinově — batch ~20 shopů per run.
+Cron: hodinově — batch ~50 shopů per run (raised from 20 thanks to Crawl4AI).
 """
 import os
 import re
@@ -23,6 +27,7 @@ import requests
 
 sys.path.insert(0, "/app")
 from jobs.db import get_conn, put_conn
+from jobs.crawl4ai_client import crawl4ai_scrape, crawl4ai_health
 
 
 # ----------------------------------------------------------------------------
@@ -31,9 +36,12 @@ from jobs.db import get_conn, put_conn
 FIRECRAWL_API_URL = "https://api.firecrawl.dev/v1/scrape"
 FIRECRAWL_API_KEY = os.environ.get("FIRECRAWL_API_KEY", "").strip()
 
-MAX_SHOPS_PER_RUN = 20
+MAX_SHOPS_PER_RUN = 50          # raised from 20 — Crawl4AI is free
 FIRECRAWL_TIMEOUT_SECONDS = 60
 FIRECRAWL_MAX_RETRIES = 2
+
+# Engine selection — Crawl4AI first, Firecrawl fallback
+_USE_CRAWL4AI = None  # lazy init
 
 # Ordered by specificity — legal pages first, fall back to contact/about.
 IMPRINT_PATH_CANDIDATES = [
@@ -139,9 +147,34 @@ ENTITY_TYPE_PATTERNS = [
 
 
 # ----------------------------------------------------------------------------
-# Firecrawl
+# Engine selection
 # ----------------------------------------------------------------------------
-def firecrawl_scrape_legal(url: str) -> dict | None:
+LEGAL_PROMPT = (
+    "Extract the legal entity / company information from this page. "
+    "Focus on the official company name (including legal form like s.r.o., GmbH, Ltd), "
+    "VAT number, national business registration number, and registered address. "
+    "Only extract if you find explicit legal/imprint information on the page. "
+    "Ignore contact forms and privacy policies."
+)
+
+
+def _check_crawl4ai() -> bool:
+    """Lazy check if Crawl4AI is available. Cached for the run."""
+    global _USE_CRAWL4AI
+    if _USE_CRAWL4AI is None:
+        _USE_CRAWL4AI = crawl4ai_health()
+        engine = "Crawl4AI" if _USE_CRAWL4AI else "Firecrawl (fallback)"
+        print(f"[legal] Engine: {engine}", flush=True)
+    return _USE_CRAWL4AI
+
+
+def _scrape_via_crawl4ai(url: str) -> dict | None:
+    """Scrape legal page via self-hosted Crawl4AI."""
+    return crawl4ai_scrape(url=url, schema=LEGAL_SCHEMA, prompt=LEGAL_PROMPT)
+
+
+def _scrape_via_firecrawl(url: str) -> dict | None:
+    """Scrape legal page via Firecrawl cloud API (paid fallback)."""
     if not FIRECRAWL_API_KEY:
         print("[legal] FATAL: FIRECRAWL_API_KEY missing", flush=True)
         return None
@@ -151,13 +184,7 @@ def firecrawl_scrape_legal(url: str) -> dict | None:
         "formats": ["json"],
         "jsonOptions": {
             "schema": LEGAL_SCHEMA,
-            "prompt": (
-                "Extract the legal entity / company information from this page. "
-                "Focus on the official company name (including legal form like s.r.o., GmbH, Ltd), "
-                "VAT number, national business registration number, and registered address. "
-                "Only extract if you find explicit legal/imprint information on the page. "
-                "Ignore contact forms and privacy policies."
-            ),
+            "prompt": LEGAL_PROMPT,
         },
         "proxy": "stealth",
         "onlyMainContent": True,
@@ -215,6 +242,17 @@ def firecrawl_scrape_legal(url: str) -> dict | None:
     return None
 
 
+def scrape_legal(url: str) -> dict | None:
+    """Scrape legal page. Crawl4AI first, Firecrawl fallback."""
+    if _check_crawl4ai():
+        result = _scrape_via_crawl4ai(url)
+        if result is not None:
+            return result
+        print(f"[legal] Crawl4AI failed for {url}, trying Firecrawl...", flush=True)
+
+    return _scrape_via_firecrawl(url)
+
+
 # ----------------------------------------------------------------------------
 # URL discovery
 # ----------------------------------------------------------------------------
@@ -238,7 +276,7 @@ def find_imprint_page(shop_url: str) -> tuple[str | None, dict | None]:
         except requests.RequestException:
             continue
 
-        data = firecrawl_scrape_legal(url)
+        data = scrape_legal(url)
         if data and isinstance(data, dict) and data.get("legal_name"):
             # Require at least one identifier besides name (avoid noise)
             if data.get("vat_id") or data.get("registration_number") or data.get("registered_address"):
@@ -556,8 +594,8 @@ def main() -> None:
     start_ts = time.time()
     print(f"=== Legal Scraper starting at {time.strftime('%Y-%m-%d %H:%M:%S')} ===", flush=True)
 
-    if not FIRECRAWL_API_KEY:
-        print("[legal] ERROR: FIRECRAWL_API_KEY missing — aborting", flush=True)
+    if not FIRECRAWL_API_KEY and not crawl4ai_health():
+        print("[legal] ERROR: Neither Crawl4AI nor FIRECRAWL_API_KEY available — aborting", flush=True)
         sys.exit(1)
 
     country_map = load_country_map()

@@ -1,21 +1,21 @@
 """
 Job: Shipping Scraper
 Cíl: scrape shipping info pages ze shopů bez shipping_checked_at timestamp.
-Extrahuje shipping zones + methods + cost + delivery days přes Firecrawl AI extraction.
+Extrahuje shipping zones + methods + cost + delivery days přes LLM AI extraction.
+
+Engine priority:
+  1. Crawl4AI (self-hosted, $0) — default
+  2. Firecrawl (cloud API, paid) — fallback pokud Crawl4AI selže nebo není dostupný
 
 Workflow:
   1. SELECT shops WHERE shipping_checked_at IS NULL AND deleted_at IS NULL
   2. Discover shipping page URL — zkusit známé patterns (/doprava, /shipping, /delivery...)
-  3. POST Firecrawl /v1/scrape s jsonOptions schema (zones + methods)
+  3. Scrape via Crawl4AI (→ fallback Firecrawl) s JSON schema (zones + methods)
   4. Insert shipping_zones + shipping_methods (upsert by (shop_id, destination_country_id))
   5. UPDATE shops SET shipping_checked_at = NOW()
 
-Cron: hodinově — zpracovává batch ~20 shopů per run (Firecrawl budget control).
-
-Notes:
-  - Většina shopů nemá všechny EU země v shipping page. Scraper extrahuje pouze to,
-    co najde. Chybějící země zůstanou neznámé (no row = unchecked).
-  - Používá FIRECRAWL_API_KEY env var (stejný jako firecrawl_scraper.py).
+Cron: hodinově — zpracovává batch ~20 shopů per run.
+Batch size zvýšen z 20 na 50 díky Crawl4AI ($0 cost).
 """
 import os
 import sys
@@ -27,6 +27,7 @@ import requests
 
 sys.path.insert(0, "/app")
 from jobs.db import get_conn, put_conn
+from jobs.crawl4ai_client import crawl4ai_scrape, crawl4ai_health
 
 
 # ----------------------------------------------------------------------------
@@ -35,10 +36,13 @@ from jobs.db import get_conn, put_conn
 FIRECRAWL_API_URL = "https://api.firecrawl.dev/v1/scrape"
 FIRECRAWL_API_KEY = os.environ.get("FIRECRAWL_API_KEY", "").strip()
 
-MAX_SHOPS_PER_RUN = 20
+MAX_SHOPS_PER_RUN = 50          # raised from 20 — Crawl4AI is free
 MAX_CONCURRENT_WORKERS = 4
 FIRECRAWL_TIMEOUT_SECONDS = 60
 FIRECRAWL_MAX_RETRIES = 2
+
+# Engine selection — Crawl4AI first, Firecrawl fallback
+_USE_CRAWL4AI = None  # lazy init
 
 # Path candidates for shipping info page (first found = used)
 # Ordered by specificity: longer/more specific first to avoid matching home pages.
@@ -146,10 +150,34 @@ SHIPPING_SCHEMA = {
 
 
 # ----------------------------------------------------------------------------
-# Firecrawl scrape
+# Engine selection
 # ----------------------------------------------------------------------------
-def firecrawl_scrape_shipping(url: str) -> dict | None:
-    """Call Firecrawl /v1/scrape with shipping schema. Returns JSON or None."""
+SHIPPING_PROMPT = (
+    "Extract shipping information from this e-commerce page. "
+    "For each destination country listed, capture: ISO2 code, free shipping threshold (if any), "
+    "delivery days range, and list of shipping methods with prices. "
+    "If a country is mentioned but no price given, still include it with ships_to=true. "
+    "Use ISO 3166-1 alpha-2 codes (e.g. CZ, DE, AT). Skip countries that are explicitly excluded."
+)
+
+
+def _check_crawl4ai() -> bool:
+    """Lazy check if Crawl4AI is available. Cached for the run."""
+    global _USE_CRAWL4AI
+    if _USE_CRAWL4AI is None:
+        _USE_CRAWL4AI = crawl4ai_health()
+        engine = "Crawl4AI" if _USE_CRAWL4AI else "Firecrawl (fallback)"
+        print(f"[shipping] Engine: {engine}", flush=True)
+    return _USE_CRAWL4AI
+
+
+def _scrape_via_crawl4ai(url: str) -> dict | None:
+    """Scrape shipping page via self-hosted Crawl4AI."""
+    return crawl4ai_scrape(url=url, schema=SHIPPING_SCHEMA, prompt=SHIPPING_PROMPT)
+
+
+def _scrape_via_firecrawl(url: str) -> dict | None:
+    """Scrape shipping page via Firecrawl cloud API (paid fallback)."""
     if not FIRECRAWL_API_KEY:
         print("[shipping] FATAL: FIRECRAWL_API_KEY missing", flush=True)
         return None
@@ -159,13 +187,7 @@ def firecrawl_scrape_shipping(url: str) -> dict | None:
         "formats": ["json"],
         "jsonOptions": {
             "schema": SHIPPING_SCHEMA,
-            "prompt": (
-                "Extract shipping information from this e-commerce page. "
-                "For each destination country listed, capture: ISO2 code, free shipping threshold (if any), "
-                "delivery days range, and list of shipping methods with prices. "
-                "If a country is mentioned but no price given, still include it with ships_to=true. "
-                "Use ISO 3166-1 alpha-2 codes (e.g. CZ, DE, AT). Skip countries that are explicitly excluded."
-            ),
+            "prompt": SHIPPING_PROMPT,
         },
         "proxy": "stealth",
         "onlyMainContent": True,
@@ -225,6 +247,18 @@ def firecrawl_scrape_shipping(url: str) -> dict | None:
     return None
 
 
+def scrape_shipping(url: str) -> dict | None:
+    """Scrape shipping page. Crawl4AI first, Firecrawl fallback."""
+    if _check_crawl4ai():
+        result = _scrape_via_crawl4ai(url)
+        if result is not None:
+            return result
+        # Crawl4AI failed on this URL — try Firecrawl as fallback
+        print(f"[shipping] Crawl4AI failed for {url}, trying Firecrawl...", flush=True)
+
+    return _scrape_via_firecrawl(url)
+
+
 # ----------------------------------------------------------------------------
 # URL discovery
 # ----------------------------------------------------------------------------
@@ -254,7 +288,7 @@ def find_shipping_page(shop_url: str) -> tuple[str | None, dict | None]:
         except requests.RequestException:
             continue
 
-        data = firecrawl_scrape_shipping(url)
+        data = scrape_shipping(url)
         if data and isinstance(data.get("zones"), list) and len(data["zones"]) > 0:
             return url, data
 
@@ -596,8 +630,8 @@ def main() -> None:
     start_ts = time.time()
     print(f"=== Shipping Scraper starting at {time.strftime('%Y-%m-%d %H:%M:%S')} ===", flush=True)
 
-    if not FIRECRAWL_API_KEY:
-        print("[shipping] ERROR: FIRECRAWL_API_KEY missing — aborting", flush=True)
+    if not FIRECRAWL_API_KEY and not crawl4ai_health():
+        print("[shipping] ERROR: Neither Crawl4AI nor FIRECRAWL_API_KEY available — aborting", flush=True)
         sys.exit(1)
 
     country_map = load_country_map()

@@ -124,6 +124,71 @@ def extract_product(url):
         except (json.JSONDecodeError, ValueError):
             continue
 
+    # Fallback: Microdata (itemprop)
+    try:
+        name_m = re.search(r'itemprop="name"[^>]*content="([^"]+)"', html, re.I)
+        if not name_m:
+            name_m = re.search(r'<[^>]*itemprop="name"[^>]*>([^<]+)<', html, re.I)
+        price_m = re.search(r'itemprop="price"[^>]*content="([^"]+)"', html, re.I)
+        currency_m = re.search(r'itemprop="priceCurrency"[^>]*content="([^"]+)"', html, re.I)
+        sku_m = re.search(r'itemprop="sku"[^>]*content="([^"]+)"', html, re.I)
+        gtin_m = re.search(r'itemprop="gtin\d*"[^>]*content="([^"]+)"', html, re.I)
+        brand_m = re.search(r'itemprop="brand"[^>]*content="([^"]+)"', html, re.I)
+        if not brand_m:
+            brand_m = re.search(r'<[^>]*itemprop="brand"[^>]*>([^<]+)<', html, re.I)
+        image_m = re.search(r'itemprop="image"[^>]*content="([^"]+)"', html, re.I)
+        if not image_m:
+            image_m = re.search(r'<img[^>]*itemprop="image"[^>]*src="([^"]+)"', html, re.I)
+        avail_m = re.search(r'itemprop="availability"[^>]*(?:content|href)="([^"]+)"', html, re.I)
+
+        if name_m and price_m:
+            try:
+                price_val = float(price_m.group(1).replace(",", ".").strip())
+            except ValueError:
+                price_val = None
+            if price_val is not None:
+                return {
+                    "name": name_m.group(1).strip(),
+                    "brand": brand_m.group(1).strip() if brand_m else "",
+                    "sku": sku_m.group(1).strip() if sku_m else "",
+                    "ean": gtin_m.group(1).strip() if gtin_m else "",
+                    "price": price_val,
+                    "currency": currency_m.group(1).strip() if currency_m else "EUR",
+                    "availability": avail_m.group(1).strip() if avail_m else "",
+                    "image_url": image_m.group(1).strip() if image_m else "",
+                    "description": "",
+                    "url": url,
+                    "source": "microdata_scrape",
+                    "raw": None,
+                }
+    except Exception:
+        pass
+
+    # Fallback: OG meta tags (product:price)
+    try:
+        og_title = re.search(r'property="og:title"[^>]*content="([^"]+)"', html, re.I)
+        og_price = re.search(r'property="product:price:amount"[^>]*content="([^"]+)"', html, re.I)
+        og_currency = re.search(r'property="product:price:currency"[^>]*content="([^"]+)"', html, re.I)
+        og_image = re.search(r'property="og:image"[^>]*content="([^"]+)"', html, re.I)
+        if og_title and og_price:
+            try:
+                price_val = float(og_price.group(1).replace(",", ".").strip())
+            except ValueError:
+                price_val = None
+            if price_val is not None:
+                return {
+                    "name": og_title.group(1).strip(),
+                    "brand": "", "sku": "", "ean": "",
+                    "price": price_val,
+                    "currency": og_currency.group(1).strip() if og_currency else "EUR",
+                    "availability": "",
+                    "image_url": og_image.group(1).strip() if og_image else "",
+                    "description": "", "url": url,
+                    "source": "jsonld_scrape", "raw": None,
+                }
+    except Exception:
+        pass
+
     return None
 
 
@@ -178,10 +243,43 @@ def scrape_shop(shop_id, domain, feed_url, country_id):
 
     saved = 0
     errors = 0
+    fetched = 0
 
+    # Phase 1: Probe first 20 URLs — if 0 hits, skip entire shop
+    probe_urls = urls[:20]
+    probe_hits = 0
+    for url in probe_urls:
+        data = extract_product(url)
+        fetched += 1
+        if data and data.get("name") and data.get("price") is not None:
+            probe_hits += 1
+            data["volume_ml"] = volume_ml_from_title(data["name"])
+            try:
+                upsert_product_with_offer(shop_id=shop_id, country_id=country_id, product_data=data)
+                saved += 1
+            except Exception as e:
+                errors += 1
+
+    if probe_hits == 0 and len(probe_urls) >= 10:
+        print(f"[{domain}] SKIP — 0/{len(probe_urls)} probe hits (no structured data)", flush=True)
+        shop_duration = time.time() - shop_start
+        with _metrics_lock:
+            _run_metrics["shops_failed"] += 1
+            _run_metrics["shop_details"].append({
+                "shop_id": shop_id, "domain": domain, "urls": len(urls),
+                "saved": 0, "errors": 0, "duration_s": round(shop_duration, 1),
+                "hit_rate_pct": 0, "pages_per_s": 0, "skipped": True,
+            })
+        return 0
+
+    print(f"[{domain}] Probe: {probe_hits}/{len(probe_urls)} hits — continuing full scrape...", flush=True)
+
+    # Phase 2: Full scrape remaining URLs
+    remaining_urls = urls[20:]
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        futures = {executor.submit(extract_product, url): url for url in urls}
+        futures = {executor.submit(extract_product, url): url for url in remaining_urls}
         for future in as_completed(futures):
+            fetched += 1
             try:
                 data = future.result()
                 if not data or not data.get("name") or data.get("price") is None:

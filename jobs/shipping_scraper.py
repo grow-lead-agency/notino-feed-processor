@@ -37,7 +37,7 @@ FIRECRAWL_API_URL = "https://api.firecrawl.dev/v1/scrape"
 FIRECRAWL_API_KEY = os.environ.get("FIRECRAWL_API_KEY", "").strip()
 
 MAX_SHOPS_PER_RUN = 50          # raised from 20 — Crawl4AI is free
-MAX_CONCURRENT_WORKERS = 4
+MAX_CONCURRENT_WORKERS = 8      # raised from 4 — node-03 has 16 cores, 25GB RAM free
 FIRECRAWL_TIMEOUT_SECONDS = 60
 FIRECRAWL_MAX_RETRIES = 2
 

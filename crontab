@@ -29,14 +29,17 @@
 
 # ── FIRECRAWL JOBS (paid, keep conservative) ───────────────────────
 
-# Firecrawl — hard/blocked shops, 2× daily (was 1×). Budget: ~$40/day max.
+# Firecrawl — hard/blocked shops, 2× daily. Budget: ~$40/day max.
+# ONLY job still using Firecrawl cloud (needs Fire-engine anti-bot).
 0 3,15 * * * python /app/jobs/firecrawl_scraper.py >> /proc/1/fd/1 2>&1
 
-# Shipping scraper — every 2h, batch of 20 shops (Firecrawl AI extract)
-15 */2 * * * flock -n /tmp/shipping_scraper.lock python /app/jobs/shipping_scraper.py >> /proc/1/fd/1 2>&1
+# ── CRAWL4AI JOBS (self-hosted, FREE — run aggressively) ──────────
 
-# Legal entity scraper — every 2h (+30m offset), batch of 20 shops
-45 */2 * * * flock -n /tmp/legal_scraper.lock python /app/jobs/legal_scraper.py >> /proc/1/fd/1 2>&1
+# Shipping scraper — every hour, batch of 50 shops (Crawl4AI primary, Firecrawl fallback)
+15 * * * * flock -n /tmp/shipping_scraper.lock python /app/jobs/shipping_scraper.py >> /proc/1/fd/1 2>&1
+
+# Legal entity scraper — every hour (+30m offset), batch of 50 shops
+45 * * * * flock -n /tmp/legal_scraper.lock python /app/jobs/legal_scraper.py >> /proc/1/fd/1 2>&1
 
 # ── ENRICHMENT JOBS (DB-only, free) ────────────────────────────────
 

@@ -1,36 +1,58 @@
 # notino-feed-processor crontab (supercronic)
 #
+# AGGRESSIVE CONFIG — utilizing CPX62 (16 cores, 32 GB RAM)
+# Plain HTTP jobs run frequently (free), Firecrawl stays conservative (paid).
+#
 # Queue architecture:
-#   Scheduler (hourly) → Redis queue → Worker (continuous)
+#   Scheduler (every 15 min) → Redis queue → 4 parallel Workers (continuous)
 #   Stalled job recovery built into both scheduler + worker
 #   Delayed job promotion built into both scheduler + worker
 
-# Queue scheduler — check what's due, enqueue, promote delayed, recover stalled
-0 * * * * python /app/jobs/job_queue.py schedule >> /proc/1/fd/1 2>&1
+# ── SCHEDULER ──────────────────────────────────────────────────────
+# Check shop_scrape_config for due jobs, enqueue to Redis (every 15 min)
+*/15 * * * * python /app/jobs/job_queue.py schedule >> /proc/1/fd/1 2>&1
 
-# Queue worker — continuous, flock prevents duplicate instances
-5 * * * * flock -n /tmp/queue_worker.lock python /app/jobs/queue_worker.py >> /proc/1/fd/1 2>&1
+# ── QUEUE WORKERS (4 parallel instances) ───────────────────────────
+# Each worker picks highest-priority job, routes to correct scraper.
+# flock per worker ID prevents duplicate of SAME worker, but 4 can run simultaneously.
+# With 50 threads inside jsonld_scraper, this gives ~200 concurrent HTTP fetches.
+0 * * * * flock -n /tmp/worker_1.lock env WORKER_ID=w-1 python /app/jobs/queue_worker.py >> /proc/1/fd/1 2>&1
+2 * * * * flock -n /tmp/worker_2.lock env WORKER_ID=w-2 python /app/jobs/queue_worker.py >> /proc/1/fd/1 2>&1
+4 * * * * flock -n /tmp/worker_3.lock env WORKER_ID=w-3 python /app/jobs/queue_worker.py >> /proc/1/fd/1 2>&1
+6 * * * * flock -n /tmp/worker_4.lock env WORKER_ID=w-4 python /app/jobs/queue_worker.py >> /proc/1/fd/1 2>&1
 
-# Sitemap XML feeds — diff detection (independent of queue)
-0 */6 * * * python /app/jobs/sitemap_crawler.py >> /proc/1/fd/1 2>&1
+# ── PLAIN HTTP JOBS (free, run often) ──────────────────────────────
 
-# Hlídač Shopů API — CZ/SK price history
-0 */6 * * * python /app/jobs/hlidac_shopu.py >> /proc/1/fd/1 2>&1
+# Sitemap XML feeds — every 2 hours (was 6h). Detects new/removed products.
+0 */2 * * * python /app/jobs/sitemap_crawler.py >> /proc/1/fd/1 2>&1
 
-# Firecrawl — hard/blocked shops (nightly, uses own budget system)
-0 3 * * * python /app/jobs/firecrawl_scraper.py >> /proc/1/fd/1 2>&1
+# Hlídač Shopů API — every 4 hours (was 6h). CZ/SK price history.
+30 */4 * * * python /app/jobs/hlidac_shopu.py >> /proc/1/fd/1 2>&1
 
-# Shipping scraper — hourly, batch of 20 shops per run (skips already-checked via shipping_checked_at)
-# Discovers shipping page URL, extracts zones + methods via Firecrawl AI extraction
-15 * * * * flock -n /tmp/shipping_scraper.lock python /app/jobs/shipping_scraper.py >> /proc/1/fd/1 2>&1
+# ── FIRECRAWL JOBS (paid, keep conservative) ───────────────────────
 
-# Legal entity scraper — hourly (+30m offset), batch of 20 shops per run
-# Discovers imprint page URL, extracts legal_name/VAT/reg_number via Firecrawl AI extraction
-45 * * * * flock -n /tmp/legal_scraper.lock python /app/jobs/legal_scraper.py >> /proc/1/fd/1 2>&1
+# Firecrawl — hard/blocked shops, 2× daily (was 1×). Budget: ~$40/day max.
+0 3,15 * * * python /app/jobs/firecrawl_scraper.py >> /proc/1/fd/1 2>&1
 
-# Affiliate XML feeds — po registraci aktivovat
-# 0 4 * * * python /app/jobs/affiliate_feeds.py >> /proc/1/fd/1 2>&1
+# Shipping scraper — every 2h, batch of 20 shops (Firecrawl AI extract)
+15 */2 * * * flock -n /tmp/shipping_scraper.lock python /app/jobs/shipping_scraper.py >> /proc/1/fd/1 2>&1
 
+# Legal entity scraper — every 2h (+30m offset), batch of 20 shops
+45 */2 * * * flock -n /tmp/legal_scraper.lock python /app/jobs/legal_scraper.py >> /proc/1/fd/1 2>&1
+
+# ── ENRICHMENT JOBS (DB-only, free) ────────────────────────────────
+
+# Offer enrichment — batch SQL updates, every 6h after new data lands
+30 */6 * * * flock -n /tmp/offer_enricher.lock python /app/jobs/offer_enricher.py >> /proc/1/fd/1 2>&1
+
+# Keyword extraction — daily at 5 AM (after overnight scraping)
+0 5 * * * flock -n /tmp/keyword_extractor.lock python /app/jobs/keyword_extractor.py >> /proc/1/fd/1 2>&1
+
+# ── DISABLED (waiting for setup) ───────────────────────────────────
+# Affiliate XML feeds — aktivovat po Awin/CJ registraci
+# 0 */4 * * * python /app/jobs/affiliate_feeds.py >> /proc/1/fd/1 2>&1
+
+# ── MAINTENANCE ────────────────────────────────────────────────────
 # Redis backup — daily RDB snapshot
 0 1 * * * redis-cli -a "${REDIS_PASSWORD:-notino-queue-2026}" -h redis BGSAVE >> /proc/1/fd/1 2>&1
 

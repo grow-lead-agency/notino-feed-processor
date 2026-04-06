@@ -26,8 +26,8 @@ from jobs.job_queue import (
 )
 
 WORKER_ID = os.environ.get("WORKER_ID", f"w-{os.getpid()}")
-IDLE_SLEEP = 30
-MAX_IDLE_CYCLES = 120  # 1h idle → exit (cron restarts)
+IDLE_SLEEP = 15          # Check queue every 15s (was 30s)
+MAX_IDLE_CYCLES = 240    # 1h idle → exit (was 120 × 30s, now 240 × 15s)
 STALE_CHECK_INTERVAL = 300  # check stalled every 5 min
 LOCK_RENEW_INTERVAL = DEFAULT_LOCK_TTL_S // 3  # renew lock every 1/3 of TTL
 

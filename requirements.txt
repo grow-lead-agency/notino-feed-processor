@@ -9,6 +9,9 @@ beautifulsoup4==4.12.3
 # PostgreSQL
 psycopg2-binary==2.9.10
 
+# Redis (queue backend)
+redis==5.2.1
+
 # Scheduling / utilities
 python-dotenv==1.0.1
 tenacity==9.0.0

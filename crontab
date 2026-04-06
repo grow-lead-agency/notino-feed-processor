@@ -1,19 +1,30 @@
 # notino-feed-processor crontab (supercronic format)
-# 
-# Job 1: Sitemap XML feeds — 316 shopů, heavy, 1x za 6 hodin
+#
+# Queue-based architecture:
+#   - Scheduler enqueues shops based on tier (class-1 daily, class-2 bi-daily, class-3 weekly)
+#   - Worker runs continuously, picks from Redis queue by priority
+#   - Cron still used for: scheduler dispatch, sitemap diff, Hlídač Shopů, cleanup
+
+# Job 1: Queue Scheduler — check what's due, enqueue to Redis (every hour)
+0 * * * * python /app/jobs/queue_scheduler.py >> /app/logs/queue_scheduler.log 2>&1
+
+# Job 2: Queue Worker — continuous worker (restarts hourly via cron if idle/crashed)
+5 * * * * python /app/jobs/queue_worker.py >> /app/logs/queue_worker.log 2>&1
+
+# Job 3: Sitemap XML feeds — sitemap diff detection
 0 */6 * * * python /app/jobs/sitemap_crawler.py >> /app/logs/sitemap_crawler.log 2>&1
 
-# Job 2: JSON-LD product pages — 30+ shopů, 2x denně  
-30 6,18 * * * python /app/jobs/jsonld_scraper.py >> /app/logs/jsonld_scraper.log 2>&1
-
-# Job 3: Affiliate XML feeds (Awin/CJ) — po registraci aktivovat
-# 0 4 * * * python /app/jobs/affiliate_feeds.py >> /app/logs/affiliate_feeds.log 2>&1
-
-# Job 4: Hlídač Shopů API — price history, 4x denně
+# Job 4: Hlídač Shopů API — CZ/SK price history
 0 */6 * * * python /app/jobs/hlidac_shopu.py >> /app/logs/hlidac_shopu.log 2>&1
 
-# Job 5: Cleanup starých cache souborů (>7 dní)
-0 2 * * * find /app/cache -mtime +7 -delete >> /app/logs/cleanup.log 2>&1
+# Job 5: Affiliate XML feeds (Awin/CJ) — po registraci aktivovat
+# 0 4 * * * python /app/jobs/affiliate_feeds.py >> /app/logs/affiliate_feeds.log 2>&1
 
 # Job 6: Firecrawl scraper for hard/protected shops — 1× denně v noci
 0 3 * * * python /app/jobs/firecrawl_scraper.py >> /app/logs/firecrawl_scraper.log 2>&1
+
+# Job 7: Cleanup starých cache souborů (>7 dní)
+0 2 * * * find /app/cache -mtime +7 -delete >> /app/logs/cleanup.log 2>&1
+
+# LEGACY: direct jsonld_scraper cron (disabled — replaced by queue worker)
+# 30 6,18 * * * python /app/jobs/jsonld_scraper.py >> /app/logs/jsonld_scraper.log 2>&1

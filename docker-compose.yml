@@ -1,11 +1,60 @@
 # notino-feed-processor — Docker Compose
-# Deploy jako Coolify "Docker Compose" service na growlead-node-03
-# Node-03 je nejvolnější node (datové pipeline patří tam)
+# Deploy jako Coolify "Docker Compose" service na growlead-node-03 (CPX62: 16 cores, 32 GB RAM)
 #
-# NEON DB: external (nepotřebujeme local DB)
-# Persistent volumes: cache, logs, feeds, config
+# Architecture:
+#   Redis (queue) → BullMQ scheduler (dispatches jobs) → Workers (scrape + upsert)
+#   Supercronic still runs for simple cron jobs (sitemap diff, cleanup)
+#
+# NEON DB: external (Neon Launch plan, 10 GB)
 
 services:
+  # ============================================================
+  # REDIS — job queue backend
+  # ============================================================
+  redis:
+    image: redis:7-alpine
+    container_name: notino-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy noeviction
+    volumes:
+      - redis-data:/data
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 768M
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # ============================================================
+  # BULLMQ BOARD — web UI for queue monitoring
+  # ============================================================
+  bull-board:
+    image: deadly0/bull-board:latest
+    container_name: notino-bull-board
+    restart: unless-stopped
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - BULL_PREFIX=notino
+      - PORT=3000
+    ports:
+      - "3088:3000"
+    depends_on:
+      redis:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "0.2"
+          memory: 256M
+
+  # ============================================================
+  # FEED PROCESSOR — scrapers + queue workers
+  # ============================================================
   feed-processor:
     build:
       context: .
@@ -13,8 +62,10 @@ services:
     image: notino-feed-processor:latest
     container_name: notino-feed-processor
     restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
 
-    # Coolify labels — no public port needed (cron only)
     labels:
       - coolify.managed=true
       - coolify.type=service
@@ -23,10 +74,12 @@ services:
     environment:
       # Neon PostgreSQL
       - DATABASE_URL=${DATABASE_URL}
-      # Affiliate APIs (optional — activate after registration)
+      # Redis (internal docker network)
+      - REDIS_URL=redis://redis:6379/0
+      # Affiliate APIs
       - AWIN_API_KEY=${AWIN_API_KEY:-}
       - CJ_API_KEY=${CJ_API_KEY:-}
-      # Firecrawl managed scraping (hard/protected shops — CF challenge, DataDome)
+      # Firecrawl managed scraping
       - FIRECRAWL_API_KEY=${FIRECRAWL_API_KEY:-}
       # Logging
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
@@ -38,9 +91,7 @@ services:
       - feed-processor-feeds:/app/feeds
       - feed-processor-config:/app/config
 
-    # Resource limits — node-03 CPX62: 16 cores, 32 GB RAM, 640 GB disk
-    # Scraper is the primary workload — give it almost everything
-    # Other services (Wiki.js, Langfuse, Trilium, Umami) use <2 GB + <1 CPU total
+    # Scraper = primary workload on CPX62
     deploy:
       resources:
         limits:
@@ -64,6 +115,8 @@ services:
         max-file: "5"
 
 volumes:
+  redis-data:
+    driver: local
   feed-processor-cache:
     driver: local
   feed-processor-logs:

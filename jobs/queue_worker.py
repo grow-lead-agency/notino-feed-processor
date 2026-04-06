@@ -94,7 +94,16 @@ def process_job(job: dict) -> dict:
         return {"saved": saved, "domain": domain, "scrape_type": scrape_type}
 
     elif scrape_type == "price_check":
-        # Price check reuses the same scrapers — they already update existing offers
+        # Hard/blocked shops with Firecrawl engine → smart price checker (top-N, 96% cheaper)
+        if scraper_engine == "firecrawl" or difficulty in ("hard", "blocked"):
+            from jobs.smart_price_checker import price_check_top_n
+            top_n = job.get("top_n", 20)
+            results = price_check_top_n(shop_id, domain, country_id, n=top_n)
+            checked = len([r for r in results if r.get("new_price") is not None])
+            changed = sum(1 for r in results if r.get("changed"))
+            return {"saved": checked, "changed": changed, "domain": domain,
+                    "scrape_type": scrape_type}
+        # Easy/medium shops → full catalog sync (cheap enough with plain HTTP)
         saved = _run_catalog_sync(shop_id, domain, feed_url, country_id, difficulty, scraper_engine)
         return {"saved": saved, "domain": domain, "scrape_type": scrape_type}
 

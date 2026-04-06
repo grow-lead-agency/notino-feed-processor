@@ -18,7 +18,7 @@ Běží na Coolify (growlead-node-03). Zapisuje do Neon PG `notino-datamining`.
 |---|---|---|---|
 | Sitemap crawler | `jobs/sitemap_crawler.py` | 6h | Stahuje sitemap XML z 316 shopů, parsuje product URLs |
 | JSON-LD scraper | `jobs/jsonld_scraper.py` | denně 2:00 | Curl product pages, extrahuje JSON-LD Product schema (easy/medium shopy) |
-| Hlídač Shopů | `jobs/hlidac_shopu.py` | denně 4:00 | Volá API `api.hlidacshopu.cz/v2/detail` pro CZ/SK price history |
+| Hlídač Shopů | `jobs/hlidac_shopu.py` | každé 4h | **Dual flow:** (1) Price sync pro CZ/SK hard/blocked shopy → `product_offers` + `offer_price_history`, (2) Enrichment → `hlidac_shopu_data`. Free alternative to Firecrawl. Max 500 URLs/run, 200ms rate limit. |
 | Affiliate feeds | `jobs/affiliate_feeds.py` | 6h | Stahuje Awin/CJ XML feedy (DISABLED — čeká na registraci) |
 | Firecrawl scraper | `jobs/firecrawl_scraper.py` | denně 3:00 | Managed scraping přes Firecrawl API — hard shopy s CF challenge/DataDome, source='firecrawl_jsonld' |
 | Shipping scraper | `jobs/shipping_scraper.py` | hodinově :15 | Scrape shipping info stránek — extrahuje shipping_zones + shipping_methods přes Firecrawl AI extraction. Batch 20 shopů/run. |

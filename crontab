@@ -23,6 +23,8 @@
 0 */2 * * * python /app/jobs/sitemap_crawler.py >> /proc/1/fd/1 2>&1
 
 # Hlídač Shopů API — every 4 hours (was 6h). CZ/SK price history.
+# Runs 2 flows: (1) price sync for CZ/SK hard/blocked shops → product_offers + offer_price_history,
+# (2) original enrichment → hlidac_shopu_data. Free alternative to Firecrawl for hard shops.
 30 */4 * * * python /app/jobs/hlidac_shopu.py >> /proc/1/fd/1 2>&1
 
 # ── FIRECRAWL JOBS (paid, keep conservative) ───────────────────────

@@ -24,10 +24,15 @@ Redis key layout:
   {prefix}:results:{domain} — hash (last result per shop)
 """
 import os
+import sys
 import json
 import time
 import uuid
 from datetime import datetime, timezone, timedelta
+
+# Allow `python /app/jobs/job_queue.py schedule` (cron entry point) to import
+# sibling modules via `from jobs.db import ...` — same pattern as other jobs.
+sys.path.insert(0, "/app")
 
 import redis
 

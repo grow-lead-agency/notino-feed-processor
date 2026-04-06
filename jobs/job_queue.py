@@ -447,15 +447,16 @@ def schedule_due_shops(r) -> int:
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("""
-        SELECT c.id, c.name, c.category, c.country_id,
+        SELECT s.id, s.name, s.category, s.country_id,
                wc.sitemap_product_feed, wc.difficulty,
-               (SELECT max(last_seen_at) FROM product_offers WHERE shop_id = c.id) as last_scraped
+               (SELECT max(last_seen_at) FROM product_offers WHERE shop_id = s.id) as last_scraped
         FROM website_checks wc
-        JOIN competitors c ON c.id = wc.competitor_id
+        JOIN shops s ON s.id = wc.shop_id
         WHERE wc.sitemap_product_feed IS NOT NULL
           AND wc.difficulty NOT IN ('dead', 'unreachable')
-          AND c.country_id IS NOT NULL
-        ORDER BY c.category, c.name
+          AND s.country_id IS NOT NULL
+          AND s.deleted_at IS NULL
+        ORDER BY s.category, s.name
     """)
     rows = cur.fetchall()
     cur.close()

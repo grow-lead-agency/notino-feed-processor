@@ -5,21 +5,20 @@
 #   Stalled job recovery built into both scheduler + worker
 #   Delayed job promotion built into both scheduler + worker
 
-# SCRAPING PAUSED — DB structural changes in progress (2026-04-06)
 # Queue scheduler — check what's due, enqueue, promote delayed, recover stalled
-# 0 * * * * python /app/jobs/job_queue.py schedule >> /proc/1/fd/1 2>&1
+0 * * * * python /app/jobs/job_queue.py schedule >> /proc/1/fd/1 2>&1
 
 # Queue worker — continuous, flock prevents duplicate instances
-# 5 * * * * flock -n /tmp/queue_worker.lock python /app/jobs/queue_worker.py >> /proc/1/fd/1 2>&1
+5 * * * * flock -n /tmp/queue_worker.lock python /app/jobs/queue_worker.py >> /proc/1/fd/1 2>&1
 
 # Sitemap XML feeds — diff detection (independent of queue)
-# 0 */6 * * * python /app/jobs/sitemap_crawler.py >> /proc/1/fd/1 2>&1
+0 */6 * * * python /app/jobs/sitemap_crawler.py >> /proc/1/fd/1 2>&1
 
 # Hlídač Shopů API — CZ/SK price history
-# 0 */6 * * * python /app/jobs/hlidac_shopu.py >> /proc/1/fd/1 2>&1
+0 */6 * * * python /app/jobs/hlidac_shopu.py >> /proc/1/fd/1 2>&1
 
 # Firecrawl — hard/blocked shops (nightly, uses own budget system)
-# 0 3 * * * python /app/jobs/firecrawl_scraper.py >> /proc/1/fd/1 2>&1
+0 3 * * * python /app/jobs/firecrawl_scraper.py >> /proc/1/fd/1 2>&1
 
 # Affiliate XML feeds — po registraci aktivovat
 # 0 4 * * * python /app/jobs/affiliate_feeds.py >> /proc/1/fd/1 2>&1

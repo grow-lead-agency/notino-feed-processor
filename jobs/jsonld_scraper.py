@@ -197,13 +197,14 @@ def get_shops_to_scrape():
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("""
-        SELECT c.id, c.name, wc.sitemap_product_feed, c.country_id
+        SELECT s.id, s.name, wc.sitemap_product_feed, s.country_id
         FROM website_checks wc
-        JOIN competitors c ON c.id = wc.competitor_id
+        JOIN shops s ON s.id = wc.shop_id
         WHERE wc.sitemap_product_feed IS NOT NULL
           AND wc.difficulty IN ('easy', 'medium')
-          AND c.country_id IS NOT NULL
-        ORDER BY c.category, c.name
+          AND s.country_id IS NOT NULL
+          AND s.deleted_at IS NULL
+        ORDER BY s.category, s.name
     """)
     rows = cur.fetchall()
     cur.close()

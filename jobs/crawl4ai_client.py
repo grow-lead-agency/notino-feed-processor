@@ -68,7 +68,7 @@ def crawl4ai_scrape(
                     "type": "LLMConfig",
                     "params": {
                         "provider": LLM_PROVIDER,
-                        "api_token": f"env:OPENAI_API_KEY",
+                        "api_token": "env:OPENROUTER_API_KEY",
                     },
                 },
                 "schema": {

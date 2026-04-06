@@ -10,6 +10,7 @@ Běží na Coolify (growlead-node-03). Zapisuje do Neon PG `notino-datamining`.
 - Python 3.12 + supercronic (cron v Dockeru)
 - requests, lxml, beautifulsoup4, psycopg2-binary, structlog, tenacity
 - Neon PostgreSQL (connection string v env `DATABASE_URL`)
+- Redis queue — Coolify-managed (viz níže)
 
 ## Cron jobs
 
@@ -29,7 +30,8 @@ Běží na Coolify (growlead-node-03). Zapisuje do Neon PG `notino-datamining`.
 git push origin main
 
 # Manuální redeploy
-source ~/.secrets/.env.master
+COOLIFY_API_URL=$(grep COOLIFY_API_URL ~/.secrets/.env.master | cut -d= -f2-)
+COOLIFY_API_TOKEN=$(grep COOLIFY_API_TOKEN ~/.secrets/.env.master | cut -d= -f2-)
 curl -s "$COOLIFY_API_URL/api/v1/deploy?uuid=rtgj2inqwjjsms4ifgfh5a05" \
   -H "Authorization: Bearer $COOLIFY_API_TOKEN"
 ```
@@ -39,9 +41,50 @@ curl -s "$COOLIFY_API_URL/api/v1/deploy?uuid=rtgj2inqwjjsms4ifgfh5a05" \
 | Var | Popis |
 |---|---|
 | `DATABASE_URL` | Neon PG connection string |
+| `REDIS_URL` | Redis connection string — automaticky nastaven na Coolify Redis (viz níže) |
 | `LOG_LEVEL` | INFO / DEBUG |
 | `AWIN_API_KEY` | Awin publisher API key (prázdný, čeká na registraci) |
 | `FIRECRAWL_API_KEY` | Firecrawl API key pro hard/protected shopy (CF challenge, DataDome) |
+
+## Redis (Coolify-managed)
+
+Redis je **Coolify-managed Database resource** na growlead-node-03 — ne manuální `docker run`.
+
+| | |
+|---|---|
+| **Coolify UUID** | `ix7k6j0ve5i8mm11f8t7e68b` |
+| **Image** | `redis:7-alpine` |
+| **Internal hostname** | `ix7k6j0ve5i8mm11f8t7e68b` (na coolify docker network) |
+| **Port** | 6379 (interní only — žádný public port) |
+| **Auth** | Ano — password v Coolify env `REDIS_PASSWORD` |
+| **AOF persistence** | Ano |
+| **Resources** | 0.5 CPU / 768 MB RAM |
+| **Network** | `coolify` (172.18.x.x) |
+| **Public port** | Žádný — není dostupný zvenčí |
+
+Starý manuální container `notino-redis` (bridge network, bez auth) byl odstraněn 2026-04-06.
+
+```bash
+# Připojení přes SSH tunnel (debug)
+ssh -L 6399:ix7k6j0ve5i8mm11f8t7e68b:6379 hetzner-node-03
+# pak lokálně: redis-cli -p 6399 -a <password>
+
+# Queue stats z feed-processor containeru
+ssh hetzner-node-03 'docker exec rtgj2inqwjjsms4ifgfh5a05-* python3 /app/jobs/job_queue.py stats'
+```
+
+## Bull Board (Queue monitoring UI)
+
+| | |
+|---|---|
+| **URL** | https://queue.notino.growlead.dev |
+| **Coolify UUID** | `qbah89qk0rghfu2hlx5k2ayp` |
+| **Image** | `deadly0/bull-board:latest` |
+| **Auth** | Username: `admin` / Password: v Coolify env `USER_PASSWORD` |
+| **Přístup** | HTTPS přes Traefik, Let's Encrypt SSL, auth required |
+
+Credentials jsou uloženy v Coolify env vars pro `notino-bull-board` — ne v kódu ani gitu.
+Pro aktuální heslo: Coolify Dashboard → notino-bull-board → Environment Variables → `USER_PASSWORD`.
 
 ## Lokální vývoj
 
@@ -50,6 +93,7 @@ cd DEV/clients/notino/feed-processor
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 export DATABASE_URL="postgresql://neondb_owner:npg_s0bkdQueT6BA@ep-soft-forest-agqhbeg0.c-2.eu-central-1.aws.neon.tech/neondb?sslmode=require"
+# Redis pro lokální testy: spusť redis-cli přes SSH tunnel (viz výše)
 python jobs/jsonld_scraper.py
 ```
 

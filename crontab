@@ -19,8 +19,12 @@
 
 # ── PLAIN HTTP JOBS (free, run often) ──────────────────────────────
 
-# Sitemap XML feeds — every 2 hours (was 6h). Detects new/removed products.
-0 */2 * * * python /app/jobs/sitemap_crawler.py >> /proc/1/fd/1 2>&1
+# Sitemap XML feeds v1 — DEPRECATED (kept for backward compat, will be removed)
+# 0 */2 * * * python /app/jobs/sitemap_crawler.py >> /proc/1/fd/1 2>&1
+
+# Sitemap Crawler v2 — universal URL discovery (ALL types: product, category, brand, blog, page, image)
+# Also writes product URLs to v1 queue for backward compat with jsonld_scraper
+0 */2 * * * flock -n /tmp/sitemap_crawler_v2.lock python /app/jobs/sitemap_crawler_v2.py >> /proc/1/fd/1 2>&1
 
 # Hlídač Shopů API — every 4 hours (was 6h). CZ/SK price history.
 # Runs 2 flows: (1) price sync for CZ/SK hard/blocked shops → product_offers + offer_price_history,
@@ -33,13 +37,14 @@
 # ONLY job still using Firecrawl cloud (needs Fire-engine anti-bot).
 0 3,15 * * * python /app/jobs/firecrawl_scraper.py >> /proc/1/fd/1 2>&1
 
-# ── CRAWL4AI JOBS (self-hosted, FREE — run aggressively) ──────────
+# ── CRAWL4AI JOBS (self-hosted, Firecrawl fallback) ───────────────
 
-# Shipping scraper — every hour, batch of 50 shops (Crawl4AI primary, Firecrawl fallback)
-15 * * * * flock -n /tmp/shipping_scraper.lock python /app/jobs/shipping_scraper.py >> /proc/1/fd/1 2>&1
+# Shipping scraper — every 6h, batch of 50 shops (Crawl4AI primary, Firecrawl fallback)
+# TODO: optimize URL candidate logic — filter by shop country/language before trying 30+ paths
+15 */6 * * * flock -n /tmp/shipping_scraper.lock python /app/jobs/shipping_scraper.py >> /proc/1/fd/1 2>&1
 
-# Legal entity scraper — every hour (+30m offset), batch of 50 shops
-45 * * * * flock -n /tmp/legal_scraper.lock python /app/jobs/legal_scraper.py >> /proc/1/fd/1 2>&1
+# Legal entity scraper — every 6h (+30m offset), batch of 50 shops
+45 */6 * * * flock -n /tmp/legal_scraper.lock python /app/jobs/legal_scraper.py >> /proc/1/fd/1 2>&1
 
 # ── ENRICHMENT JOBS (DB-only, free) ────────────────────────────────
 

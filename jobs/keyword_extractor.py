@@ -293,7 +293,7 @@ def extract_from_portal_categories(conn) -> list[dict]:
     keywords = []
     with conn.cursor() as cur:
         cur.execute("""
-            SELECT pc.id, pc.name, pc.name_en, pp.country_id
+            SELECT pc.id, pc.name, pc.name_en
             FROM portal_categories pc
             INNER JOIN price_portals pp ON pp.id = pc.portal_id
             WHERE pc.name IS NOT NULL AND pc.name != ''
@@ -302,7 +302,7 @@ def extract_from_portal_categories(conn) -> list[dict]:
         """)
         rows = cur.fetchall()
 
-    for _cat_id, name, name_en, _country_id in rows:
+    for _cat_id, name, name_en in rows:
         name = name.strip()
         if is_valid_keyword(name):
             lang = detect_language(name)

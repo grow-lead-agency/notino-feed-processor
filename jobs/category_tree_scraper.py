@@ -192,9 +192,11 @@ def extract_breadcrumbs_from_db(shop_id: int) -> list[dict]:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT DISTINCT product_url
-                FROM product_offers
-                WHERE shop_id = %s AND is_active = TRUE AND product_url IS NOT NULL
+                SELECT product_url FROM (
+                    SELECT DISTINCT product_url
+                    FROM product_offers
+                    WHERE shop_id = %s AND is_active = TRUE AND product_url IS NOT NULL
+                ) sub
                 ORDER BY random()
                 LIMIT %s
                 """,

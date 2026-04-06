@@ -12,14 +12,10 @@
 # Check shop_scrape_config for due jobs, enqueue to Redis (every 15 min)
 */15 * * * * python /app/jobs/job_queue.py schedule >> /proc/1/fd/1 2>&1
 
-# ── QUEUE WORKERS (4 parallel instances) ───────────────────────────
-# Each worker picks highest-priority job, routes to correct scraper.
-# flock per worker ID prevents duplicate of SAME worker, but 4 can run simultaneously.
-# With 50 threads inside jsonld_scraper, this gives ~200 concurrent HTTP fetches.
-0 * * * * flock -n /tmp/worker_1.lock env WORKER_ID=w-1 python /app/jobs/queue_worker.py >> /proc/1/fd/1 2>&1
-2 * * * * flock -n /tmp/worker_2.lock env WORKER_ID=w-2 python /app/jobs/queue_worker.py >> /proc/1/fd/1 2>&1
-4 * * * * flock -n /tmp/worker_3.lock env WORKER_ID=w-3 python /app/jobs/queue_worker.py >> /proc/1/fd/1 2>&1
-6 * * * * flock -n /tmp/worker_4.lock env WORKER_ID=w-4 python /app/jobs/queue_worker.py >> /proc/1/fd/1 2>&1
+# ── QUEUE WORKERS ──────────────────────────────────────────────────
+# Worker launcher reads desired_workers from pipeline_config DB table.
+# Spawns/kills workers to match target. flock prevents duplicate launcher.
+0 * * * * flock -n /tmp/worker_launcher.lock python /app/jobs/worker_launcher.py >> /proc/1/fd/1 2>&1
 
 # ── PLAIN HTTP JOBS (free, run often) ──────────────────────────────
 

@@ -53,12 +53,14 @@ export DATABASE_URL="postgresql://neondb_owner:npg_s0bkdQueT6BA@ep-soft-forest-a
 python jobs/jsonld_scraper.py
 ```
 
-## DB tabulky (vlastní)
+## DB
 
-- `sitemap_crawl_log` — log běhů crawleru
-- `hlidac_shopu_data` — výsledky z Hlídač Shopů API
-
-Zapisuje do sdílených tabulek: `products`, `price_history`, `scrape_jobs`
+Sdílená DB pro všechny Notino tooly: `DEV/clients/notino/db/`
+Schema, migrace, README — vše tam. Feed-processor zapisuje do:
+- `products`, `product_offers`, `offer_price_history` (core)
+- `brands` (auto-create)
+- `scrape_run_metrics`, `firecrawl_usage` (monitoring)
+- `sitemap_crawl_log`, `hlidac_shopu_data` (enrichment)
 
 ## GitHub
 

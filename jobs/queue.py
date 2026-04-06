@@ -4,16 +4,16 @@ Redis Queue Engine — BullMQ-like features in Python.
 Features:
   - Priority queue (sorted set, lower score = higher priority)
   - Job states: waiting → active → completed/failed/stalled
-  - Retry with exponential backoff + jitter
+  - Retry with exponential backoff (delayed queue, no blocking sleep)
   - Stalled job detection (lock-based, configurable TTL)
-  - Job deduplication (by shop domain — no double-processing)
-  - Rate limiting per queue (global max jobs/second)
+  - Job deduplication (atomic Lua script — no race conditions)
   - Per-shop result history
   - Queue stats (counts per state)
   - Dead letter queue (exceeded max retries)
 
 Redis key layout:
   {prefix}:waiting          — sorted set (score=priority)
+  {prefix}:delayed          — sorted set (score=retry_after timestamp)
   {prefix}:active           — hash (job_id → lock_expires_at)
   {prefix}:completed        — list (last N completed job summaries)
   {prefix}:failed           — list (last N failed job summaries)
@@ -27,7 +27,6 @@ import os
 import json
 import time
 import uuid
-import random
 from datetime import datetime, timezone, timedelta
 
 import redis
@@ -39,15 +38,30 @@ PREFIX = os.environ.get("QUEUE_PREFIX", "notino:scrape")
 # Defaults
 DEFAULT_MAX_RETRIES = 3
 DEFAULT_BACKOFF_BASE_MS = 5000
-DEFAULT_LOCK_TTL_S = 1800  # 30 min — if job takes longer, it's stalled
+DEFAULT_LOCK_TTL_S = 3600  # 60 min — safe for large shop scrapes (50K products)
 DEFAULT_STALE_CHECK_S = 60
 MAX_COMPLETED_KEEP = 500
 MAX_FAILED_KEEP = 200
-MAX_DEAD_KEEP = 100
+MAX_DEAD_KEEP = 1000  # increased from 100 — need visibility during batch failures
+
+# Lua script for atomic dedup + enqueue
+LUA_DEDUP_ENQUEUE = """
+if redis.call('SISMEMBER', KEYS[1], ARGV[1]) == 1 then
+    return 0
+end
+redis.call('SADD', KEYS[1], ARGV[1])
+return 1
+"""
+
+# Redis singleton
+_redis_client = None
 
 
 def get_redis():
-    return redis.from_url(REDIS_URL, decode_responses=True)
+    global _redis_client
+    if _redis_client is None:
+        _redis_client = redis.from_url(REDIS_URL, decode_responses=True)
+    return _redis_client
 
 
 # ============================================================
@@ -92,12 +106,14 @@ def enqueue(r, job: dict) -> bool:
     """
     Add job to waiting queue.
     Returns False if duplicate (same domain already in waiting/active).
+    Uses Lua script for atomic dedup check.
     """
     domain = job["domain"]
     dedup_key = f"{PREFIX}:dedup"
 
-    # Dedup check
-    if r.sismember(dedup_key, domain):
+    # Atomic dedup check + add
+    added = r.eval(LUA_DEDUP_ENQUEUE, 1, dedup_key, domain)
+    if not added:
         return False
 
     job_id = job["id"]
@@ -107,7 +123,6 @@ def enqueue(r, job: dict) -> bool:
     pipe.hset(job_key, mapping={k: json.dumps(v) if isinstance(v, (dict, list)) else str(v) for k, v in job.items()})
     pipe.expire(job_key, 86400)  # TTL 24h
     pipe.zadd(f"{PREFIX}:waiting", {job_id: job["priority"]})
-    pipe.sadd(dedup_key, domain)
     pipe.hincrby(f"{PREFIX}:stats", "total_enqueued", 1)
     pipe.execute()
 
@@ -121,6 +136,46 @@ def enqueue_bulk(r, jobs: list[dict]) -> int:
         if enqueue(r, job):
             enqueued += 1
     return enqueued
+
+
+def enqueue_delayed(r, job: dict, retry_after_ts: float):
+    """Add job to delayed queue (sorted by retry_after timestamp)."""
+    job_id = job["id"]
+    job_key = f"{PREFIX}:job:{job_id}"
+
+    pipe = r.pipeline()
+    pipe.hset(job_key, mapping={k: json.dumps(v) if isinstance(v, (dict, list)) else str(v) for k, v in job.items()})
+    pipe.expire(job_key, 86400)
+    pipe.zadd(f"{PREFIX}:delayed", {job_id: retry_after_ts})
+    pipe.execute()
+
+
+def promote_delayed(r) -> int:
+    """Move delayed jobs that are ready to the waiting queue. Returns count promoted."""
+    now = time.time()
+    # Get all delayed jobs with score <= now (ready to run)
+    ready = r.zrangebyscore(f"{PREFIX}:delayed", "-inf", str(now))
+    if not ready:
+        return 0
+
+    promoted = 0
+    for job_id in ready:
+        job_key = f"{PREFIX}:job:{job_id}"
+        raw = r.hgetall(job_key)
+        if not raw:
+            r.zrem(f"{PREFIX}:delayed", job_id)
+            continue
+
+        priority = int(raw.get("priority", "5"))
+
+        pipe = r.pipeline()
+        pipe.zrem(f"{PREFIX}:delayed", job_id)
+        pipe.zadd(f"{PREFIX}:waiting", {job_id: priority})
+        pipe.hset(job_key, "state", "waiting")
+        pipe.execute()
+        promoted += 1
+
+    return promoted
 
 
 # ============================================================
@@ -179,6 +234,15 @@ def dequeue(r, worker_id: str = "worker") -> dict | None:
 
 
 # ============================================================
+# LOCK RENEWAL
+# ============================================================
+
+def renew_lock(r, job_id: str, ttl: int = DEFAULT_LOCK_TTL_S):
+    """Extend the lock on an active job. Call periodically for long-running scrapes."""
+    r.hset(f"{PREFIX}:active", job_id, str(time.time() + ttl))
+
+
+# ============================================================
 # COMPLETE / FAIL
 # ============================================================
 
@@ -212,49 +276,53 @@ def complete(r, job: dict, result: dict = None):
 def fail(r, job: dict, error: str, retry: bool = True):
     """
     Mark job as failed.
-    If retry=True and attempts < max_retries, re-enqueue with exponential backoff.
+    If retry=True and attempts < max_retries, schedule delayed re-enqueue.
     Otherwise, move to dead letter queue.
+    No blocking sleep — uses delayed queue for backoff.
     """
     job_id = job["id"]
     domain = job.get("domain", "?")
     attempts = job.get("attempts", 1)
     max_retries = job.get("max_retries", DEFAULT_MAX_RETRIES)
 
-    pipe = r.pipeline()
-    pipe.hdel(f"{PREFIX}:active", job_id)
-    pipe.hincrby(f"{PREFIX}:stats", "total_failed", 1)
-
     if retry and attempts < max_retries:
-        # Exponential backoff with jitter
+        # Exponential backoff with jitter (non-blocking)
+        import random
         delay_ms = DEFAULT_BACKOFF_BASE_MS * (2 ** (attempts - 1))
         jitter = random.uniform(0.5, 1.5)
         delay_s = (delay_ms * jitter) / 1000
+        retry_after_ts = time.time() + delay_s
 
-        # Re-enqueue (keep dedup, will re-add after delay)
+        # Atomic: remove from active + dedup, update stats
+        pipe = r.pipeline()
+        pipe.hdel(f"{PREFIX}:active", job_id)
         pipe.srem(f"{PREFIX}:dedup", domain)
+        pipe.hincrby(f"{PREFIX}:stats", "total_failed", 1)
         pipe.execute()
 
-        # Create retry job
+        # Create retry job and schedule it
         retry_job = job.copy()
         retry_job["id"] = f"scrape:{domain}:{uuid.uuid4().hex[:8]}"
-        retry_job["state"] = "waiting"
+        retry_job["state"] = "delayed"
         retry_job["last_error"] = error
-        retry_job["retry_after"] = (datetime.now(timezone.utc) + timedelta(seconds=delay_s)).isoformat()
+        retry_job["retry_after"] = datetime.fromtimestamp(retry_after_ts, tz=timezone.utc).isoformat()
 
-        time.sleep(min(delay_s, 60))  # wait before re-enqueue (cap at 60s)
-        enqueue(r, retry_job)
+        enqueue_delayed(r, retry_job, retry_after_ts)
 
-        print(f"  [RETRY] {domain} attempt {attempts}/{max_retries} in {delay_s:.1f}s: {error}", flush=True)
+        print(f"  [RETRY] {domain} attempt {attempts}/{max_retries}, delayed {delay_s:.1f}s: {error}", flush=True)
     else:
-        # Dead letter queue
+        # Dead letter queue — atomic pipeline
+        pipe = r.pipeline()
+        pipe.hdel(f"{PREFIX}:active", job_id)
         pipe.srem(f"{PREFIX}:dedup", domain)
         pipe.hset(f"{PREFIX}:job:{job_id}", "state", "dead")
         pipe.hset(f"{PREFIX}:job:{job_id}", "error", error)
+        pipe.hincrby(f"{PREFIX}:stats", "total_failed", 1)
+        pipe.hincrby(f"{PREFIX}:stats", "total_dead", 1)
 
         summary = json.dumps({"id": job_id, "domain": domain, "error": error, "attempts": attempts, "at": datetime.now(timezone.utc).isoformat()})
         pipe.lpush(f"{PREFIX}:dead", summary)
         pipe.ltrim(f"{PREFIX}:dead", 0, MAX_DEAD_KEEP - 1)
-        pipe.hincrby(f"{PREFIX}:stats", "total_dead", 1)
         pipe.execute()
 
         print(f"  [DEAD] {domain} after {attempts} attempts: {error}", flush=True)
@@ -267,7 +335,7 @@ def fail(r, job: dict, error: str, retry: bool = True):
 def recover_stalled(r) -> int:
     """
     Check active jobs for expired locks.
-    Re-enqueue stalled jobs.
+    Re-enqueue stalled jobs. Atomic pipeline per job.
     Returns count of recovered jobs.
     """
     active = r.hgetall(f"{PREFIX}:active")
@@ -294,10 +362,12 @@ def recover_stalled(r) -> int:
 
             print(f"  [STALLED] {domain} (job {job_id}) — lock expired, recovering", flush=True)
 
-            # Remove from active
-            r.hdel(f"{PREFIX}:active", job_id)
-            r.srem(f"{PREFIX}:dedup", domain)
-            r.hincrby(f"{PREFIX}:stats", "total_stalled", 1)
+            # Atomic: remove from active + dedup + update stats
+            pipe = r.pipeline()
+            pipe.hdel(f"{PREFIX}:active", job_id)
+            pipe.srem(f"{PREFIX}:dedup", domain)
+            pipe.hincrby(f"{PREFIX}:stats", "total_stalled", 1)
+            pipe.execute()
 
             if attempts < max_retries:
                 # Re-enqueue
@@ -305,7 +375,7 @@ def recover_stalled(r) -> int:
                 for k, v in raw.items():
                     try:
                         job[k] = json.loads(v)
-                    except:
+                    except Exception:
                         job[k] = v
                 job["id"] = f"scrape:{domain}:{uuid.uuid4().hex[:8]}"
                 job["state"] = "waiting"
@@ -314,7 +384,7 @@ def recover_stalled(r) -> int:
                     if int_field in job:
                         try:
                             job[int_field] = int(job[int_field])
-                        except:
+                        except Exception:
                             pass
                 enqueue(r, job)
                 recovered += 1
@@ -331,6 +401,7 @@ def get_stats(r) -> dict:
     stats = r.hgetall(f"{PREFIX}:stats") or {}
     return {
         "waiting": r.zcard(f"{PREFIX}:waiting"),
+        "delayed": r.zcard(f"{PREFIX}:delayed"),
         "active": r.hlen(f"{PREFIX}:active"),
         "completed_total": int(stats.get("total_completed", 0)),
         "failed_total": int(stats.get("total_failed", 0)),
@@ -436,7 +507,12 @@ def main():
         stats_before = get_stats(r)
         print(f"Before: {stats_before}", flush=True)
 
-        # Recover stalled first
+        # Promote delayed jobs first
+        promoted = promote_delayed(r)
+        if promoted:
+            print(f"Promoted {promoted} delayed jobs to waiting", flush=True)
+
+        # Recover stalled
         recovered = recover_stalled(r)
         if recovered:
             print(f"Recovered {recovered} stalled jobs", flush=True)
@@ -445,6 +521,12 @@ def main():
 
         stats_after = get_stats(r)
         print(f"Enqueued: {enqueued}, After: {stats_after}", flush=True)
+
+        # DLQ alerting
+        dead_count = stats_after["dead_total"]
+        dead_before = stats_before["dead_total"]
+        if dead_count > dead_before:
+            print(f"  [WARN] DLQ grew by {dead_count - dead_before} entries! Check dead letter queue.", flush=True)
 
     elif cmd == "stats":
         stats = get_stats(r)

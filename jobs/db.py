@@ -2,21 +2,35 @@
 Database helper — notino-feed-processor
 Neon PostgreSQL via psycopg2 with SSL required.
 Updated 2026-04-05: Uses NEW GMC 3-table schema (products/offers/history).
+Updated 2026-04-06: ThreadedConnectionPool for multi-worker scraping.
 """
 import os
 import re
 import json
 import unicodedata
-import psycopg2
+from psycopg2.pool import ThreadedConnectionPool
 
 
-# logger removed
+# Thread-safe connection pool (lazy init)
+_pool = None
+
+
+def _get_pool() -> ThreadedConnectionPool:
+    global _pool
+    if _pool is None:
+        conn_str = os.environ["DATABASE_URL"]
+        _pool = ThreadedConnectionPool(minconn=2, maxconn=20, dsn=conn_str)
+    return _pool
 
 
 def get_conn():
-    """Return a psycopg2 connection to Neon DB."""
-    conn_str = os.environ["DATABASE_URL"]
-    return psycopg2.connect(conn_str)
+    """Return a psycopg2 connection from the pool."""
+    return _get_pool().getconn()
+
+
+def put_conn(conn):
+    """Return a connection to the pool."""
+    _get_pool().putconn(conn)
 
 
 def normalize_title(title: str) -> str:
@@ -78,7 +92,8 @@ def upsert_product(*, gtin13=None, gtin12=None, mpn=None, title,
     title_normalized = normalize_title(title)
     volume_str, volume_ml = extract_volume(title)
 
-    with get_conn() as conn:
+    conn = get_conn()
+    try:
         with conn.cursor() as cur:
             # Auto-create brand
             brand_id = get_or_create_brand(cur, brand_name)
@@ -88,7 +103,6 @@ def upsert_product(*, gtin13=None, gtin12=None, mpn=None, title,
                 cur.execute("SELECT id FROM products WHERE gtin13 = %s", (gtin13,))
                 row = cur.fetchone()
                 if row:
-                    # Update brand_id + image if missing
                     cur.execute(
                         """UPDATE products SET last_updated_at = NOW(),
                            brand_id = COALESCE(brand_id, %s),
@@ -140,6 +154,8 @@ def upsert_product(*, gtin13=None, gtin12=None, mpn=None, title,
             product_id = cur.fetchone()[0]
             conn.commit()
             return product_id
+    finally:
+        put_conn(conn)
 
 
 def upsert_offer(*, product_id, shop_id, country_id, external_sku=None,
@@ -164,7 +180,8 @@ def upsert_offer(*, product_id, shop_id, country_id, external_sku=None,
         elif "backorder" in avail:
             availability_enum = "backorder"
 
-    with get_conn() as conn:
+    conn = get_conn()
+    try:
         with conn.cursor() as cur:
             # Try match by SKU first, then by URL (fallback for NULL SKU)
             cur.execute(
@@ -238,6 +255,8 @@ def upsert_offer(*, product_id, shop_id, country_id, external_sku=None,
 
             conn.commit()
             return offer_id
+    finally:
+        put_conn(conn)
 
 
 def upsert_product_with_offer(*, shop_id, country_id, product_data):

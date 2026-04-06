@@ -15,7 +15,13 @@ services:
     image: redis:7-alpine
     container_name: notino-redis
     restart: unless-stopped
-    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy noeviction
+    command: >
+      redis-server
+        --appendonly yes
+        --appendfsync everysec
+        --maxmemory 512mb
+        --maxmemory-policy noeviction
+        --requirepass ${REDIS_PASSWORD:-notino-queue-2026}
     volumes:
       - redis-data:/data
     deploy:
@@ -24,10 +30,15 @@ services:
           cpus: "0.5"
           memory: 768M
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-notino-queue-2026}", "ping"]
       interval: 10s
       timeout: 5s
       retries: 3
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   # ============================================================
   # BULLMQ BOARD — web UI for queue monitoring
@@ -39,10 +50,11 @@ services:
     environment:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-notino-queue-2026}
       - BULL_PREFIX=notino
       - PORT=3000
     ports:
-      - "3088:3000"
+      - "127.0.0.1:3088:3000"
     depends_on:
       redis:
         condition: service_healthy
@@ -51,6 +63,16 @@ services:
         limits:
           cpus: "0.2"
           memory: 256M
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3000"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   # ============================================================
   # FEED PROCESSOR — scrapers + queue workers
@@ -74,8 +96,8 @@ services:
     environment:
       # Neon PostgreSQL
       - DATABASE_URL=${DATABASE_URL}
-      # Redis (internal docker network)
-      - REDIS_URL=redis://redis:6379/0
+      # Redis (internal docker network, with auth)
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-notino-queue-2026}@redis:6379/0
       # Affiliate APIs
       - AWIN_API_KEY=${AWIN_API_KEY:-}
       - CJ_API_KEY=${CJ_API_KEY:-}
@@ -89,20 +111,19 @@ services:
       - feed-processor-cache:/app/cache
       - feed-processor-logs:/app/logs
       - feed-processor-feeds:/app/feeds
-      - feed-processor-config:/app/config
 
-    # Scraper = primary workload on CPX62
+    # Scraper = primary workload on CPX62 (tuned: 8 CPU / 16 GB)
     deploy:
       resources:
         limits:
-          cpus: "14.0"
-          memory: 24G
+          cpus: "8.0"
+          memory: 16G
         reservations:
           cpus: "4.0"
           memory: 4G
 
     healthcheck:
-      test: ["CMD", "python", "-c", "import psycopg2; import os; psycopg2.connect(os.environ['DATABASE_URL'])"]
+      test: ["CMD", "python", "-c", "import redis; r=redis.from_url('redis://:${REDIS_PASSWORD:-notino-queue-2026}@redis:6379/0'); r.ping()"]
       interval: 60s
       timeout: 10s
       retries: 3
@@ -122,6 +143,4 @@ volumes:
   feed-processor-logs:
     driver: local
   feed-processor-feeds:
-    driver: local
-  feed-processor-config:
     driver: local

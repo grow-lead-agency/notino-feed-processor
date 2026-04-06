@@ -3,24 +3,28 @@
 # Queue architecture:
 #   Scheduler (hourly) → Redis queue → Worker (continuous)
 #   Stalled job recovery built into both scheduler + worker
+#   Delayed job promotion built into both scheduler + worker
 
-# Queue scheduler — check what's due, enqueue, recover stalled
-0 * * * * python /app/jobs/queue.py schedule >> /app/logs/queue_scheduler.log 2>&1
+# Queue scheduler — check what's due, enqueue, promote delayed, recover stalled
+0 * * * * python /app/jobs/queue.py schedule >> /proc/1/fd/1 2>&1
 
-# Queue worker — continuous, auto-restarts hourly if idle/crashed
-5 * * * * python /app/jobs/queue_worker.py >> /app/logs/queue_worker.log 2>&1
+# Queue worker — continuous, flock prevents duplicate instances
+5 * * * * flock -n /tmp/queue_worker.lock python /app/jobs/queue_worker.py >> /proc/1/fd/1 2>&1
 
 # Sitemap XML feeds — diff detection (independent of queue)
-0 */6 * * * python /app/jobs/sitemap_crawler.py >> /app/logs/sitemap_crawler.log 2>&1
+0 */6 * * * python /app/jobs/sitemap_crawler.py >> /proc/1/fd/1 2>&1
 
 # Hlídač Shopů API — CZ/SK price history
-0 */6 * * * python /app/jobs/hlidac_shopu.py >> /app/logs/hlidac_shopu.log 2>&1
+0 */6 * * * python /app/jobs/hlidac_shopu.py >> /proc/1/fd/1 2>&1
 
 # Firecrawl — hard/blocked shops (nightly, uses own budget system)
-0 3 * * * python /app/jobs/firecrawl_scraper.py >> /app/logs/firecrawl_scraper.log 2>&1
+0 3 * * * python /app/jobs/firecrawl_scraper.py >> /proc/1/fd/1 2>&1
 
 # Affiliate XML feeds — po registraci aktivovat
-# 0 4 * * * python /app/jobs/affiliate_feeds.py >> /app/logs/affiliate_feeds.log 2>&1
+# 0 4 * * * python /app/jobs/affiliate_feeds.py >> /proc/1/fd/1 2>&1
+
+# Redis backup — daily RDB snapshot
+0 1 * * * redis-cli -a "${REDIS_PASSWORD:-notino-queue-2026}" -h redis BGSAVE >> /proc/1/fd/1 2>&1
 
 # Cleanup cache (>7 days)
-0 2 * * * find /app/cache -mtime +7 -delete >> /app/logs/cleanup.log 2>&1
+0 2 * * * find /app/cache -mtime +7 -delete >> /proc/1/fd/1 2>&1

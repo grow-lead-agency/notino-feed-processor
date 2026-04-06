@@ -1,15 +1,23 @@
-FROM python:3.12-slim
+# ── Build stage (compile deps) ────────────────────────────────────
+FROM python:3.12-slim AS builder
 
-# System deps — curl + cron + supercronic (lightweight cron for containers)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl \
-    ca-certificates \
-    libpq-dev \
-    gcc \
+    libpq-dev gcc \
     && rm -rf /var/lib/apt/lists/*
 
-# Supercronic — production-grade cron for containers (no syslog noise)
-# v0.2.33 linux/amd64 — sha256 verified via GitHub releases
+WORKDIR /build
+COPY requirements.txt .
+RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
+
+
+# ── Runtime stage (no gcc, no dev headers) ────────────────────────
+FROM python:3.12-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl ca-certificates libpq5 util-linux \
+    && rm -rf /var/lib/apt/lists/*
+
+# Supercronic — production-grade cron for containers
 RUN ARCH=$(uname -m) && \
     if [ "$ARCH" = "aarch64" ]; then \
         SUPERCRONIC_BINARY="supercronic-linux-arm64"; \
@@ -21,16 +29,20 @@ RUN ARCH=$(uname -m) && \
     && chmod +x /usr/local/bin/supercronic \
     && supercronic --version
 
-WORKDIR /app
+# Copy compiled Python packages from builder
+COPY --from=builder /install /usr/local
 
-# Python deps
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Non-root user
+RUN useradd -m -s /bin/bash appuser
+
+WORKDIR /app
 
 # App code
 COPY . .
 
 # Runtime directories (volumes will override these)
-RUN mkdir -p /app/cache /app/logs /app/feeds /app/config
+RUN mkdir -p /app/cache /app/logs /app/feeds && chown -R appuser:appuser /app
+
+USER appuser
 
 CMD ["/usr/local/bin/supercronic", "/app/crontab"]

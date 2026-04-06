@@ -21,10 +21,13 @@ Env vars:
 """
 import json
 import os
+import sys
 import time
 
 import requests
 
+sys.path.insert(0, "/app")
+from jobs.langfuse_wrapper import traced_generation
 
 CRAWL4AI_URL = os.environ.get("CRAWL4AI_URL", "http://crawl4ai:11235").rstrip("/")
 LLM_PROVIDER = os.environ.get("CRAWL4AI_LLM_PROVIDER", "openai/gpt-4o-mini")
@@ -92,72 +95,91 @@ def crawl4ai_scrape(
         },
     }
 
-    for attempt in range(MAX_RETRIES + 1):
-        try:
-            resp = requests.post(
-                f"{CRAWL4AI_URL}/crawl",
-                json=payload,
-                timeout=timeout + 10,
-            )
-        except requests.RequestException as e:
-            if attempt < MAX_RETRIES:
-                time.sleep(2 ** attempt)
-                continue
-            print(f"[crawl4ai] Network error for {url}: {e}", flush=True)
-            return None
-
-        if resp.status_code == 429:
-            if attempt < MAX_RETRIES:
-                time.sleep(2 ** (attempt + 2))
-                continue
-            print(f"[crawl4ai] Rate limited (429) for {url}", flush=True)
-            return None
-
-        if resp.status_code >= 500:
-            if attempt < MAX_RETRIES:
-                time.sleep(2 ** attempt)
-                continue
-            print(f"[crawl4ai] Server error ({resp.status_code}) for {url}", flush=True)
-            return None
-
-        if resp.status_code != 200:
-            print(f"[crawl4ai] HTTP {resp.status_code} for {url}", flush=True)
-            return None
-
-        try:
-            body = resp.json()
-        except ValueError:
-            print(f"[crawl4ai] Invalid JSON response for {url}", flush=True)
-            return None
-
-        results = body.get("results", [])
-        if not results:
-            return None
-
-        result = results[0]
-        if not result.get("success"):
-            return None
-
-        extracted = result.get("extracted_content")
-        if not extracted:
-            return None
-
-        # Crawl4AI returns extracted_content as JSON string
-        if isinstance(extracted, str):
+    with traced_generation(
+        name="crawl4ai-extract",
+        model=LLM_PROVIDER,
+        input_data={"url": url, "prompt": prompt, "schema_keys": list(schema.get("properties", {}).keys())},
+        metadata={"crawl4ai_url": CRAWL4AI_URL},
+        tags=["feed-processor", "crawl4ai"],
+    ) as gen:
+        for attempt in range(MAX_RETRIES + 1):
             try:
-                extracted = json.loads(extracted)
-            except (json.JSONDecodeError, ValueError):
+                resp = requests.post(
+                    f"{CRAWL4AI_URL}/crawl",
+                    json=payload,
+                    timeout=timeout + 10,
+                )
+            except requests.RequestException as e:
+                if attempt < MAX_RETRIES:
+                    time.sleep(2 ** attempt)
+                    continue
+                print(f"[crawl4ai] Network error for {url}: {e}", flush=True)
+                gen.end(level="ERROR", status_message=f"Network error: {e}")
                 return None
 
-        # LLMExtractionStrategy may return a list — unwrap first item
-        if isinstance(extracted, list):
+            if resp.status_code == 429:
+                if attempt < MAX_RETRIES:
+                    time.sleep(2 ** (attempt + 2))
+                    continue
+                print(f"[crawl4ai] Rate limited (429) for {url}", flush=True)
+                gen.end(level="ERROR", status_message="429 rate limit exhausted")
+                return None
+
+            if resp.status_code >= 500:
+                if attempt < MAX_RETRIES:
+                    time.sleep(2 ** attempt)
+                    continue
+                print(f"[crawl4ai] Server error ({resp.status_code}) for {url}", flush=True)
+                gen.end(level="ERROR", status_message=f"Server error {resp.status_code}")
+                return None
+
+            if resp.status_code != 200:
+                print(f"[crawl4ai] HTTP {resp.status_code} for {url}", flush=True)
+                gen.end(level="ERROR", status_message=f"HTTP {resp.status_code}")
+                return None
+
+            try:
+                body = resp.json()
+            except ValueError:
+                print(f"[crawl4ai] Invalid JSON response for {url}", flush=True)
+                gen.end(level="ERROR", status_message="Invalid JSON response")
+                return None
+
+            results = body.get("results", [])
+            if not results:
+                gen.end(level="WARNING", status_message="No results")
+                return None
+
+            result = results[0]
+            if not result.get("success"):
+                gen.end(level="WARNING", status_message="Extraction not successful")
+                return None
+
+            extracted = result.get("extracted_content")
             if not extracted:
+                gen.end(level="WARNING", status_message="No extracted content")
                 return None
-            extracted = extracted[0]
 
-        return extracted
+            # Crawl4AI returns extracted_content as JSON string
+            if isinstance(extracted, str):
+                try:
+                    extracted = json.loads(extracted)
+                except (json.JSONDecodeError, ValueError):
+                    gen.end(level="ERROR", status_message="extracted_content JSON parse failed")
+                    return None
 
-    return None
+            # LLMExtractionStrategy may return a list — unwrap first item
+            if isinstance(extracted, list):
+                if not extracted:
+                    gen.end(level="WARNING", status_message="Empty extraction list")
+                    return None
+                extracted = extracted[0]
+
+            gen.end(output=extracted)
+            return extracted
+
+        gen.end(level="ERROR", status_message="All retries exhausted")
+        return None
 
 
 def crawl4ai_scrape_html(

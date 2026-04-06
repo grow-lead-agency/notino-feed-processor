@@ -15,10 +15,9 @@ import sys
 import time
 import unicodedata
 
-import requests
-
 sys.path.insert(0, "/app")
 from jobs.db import get_conn, put_conn
+from jobs.langfuse_wrapper import traced_gemini_call, flush as langfuse_flush
 
 
 # ---------------------------------------------------------------------------
@@ -343,55 +342,8 @@ def rule_based_pass(master_cats: list[dict], source_cats: dict) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# AI pass (Gemini Flash)
+# AI pass (Gemini Flash) — traced via Langfuse
 # ---------------------------------------------------------------------------
-def _call_gemini(prompt: str) -> str | None:
-    """Call Gemini API with retry. Returns response text or None."""
-    if not GEMINI_API_KEY:
-        print("[category_mapper] WARNING: GEMINI_API_KEY not set, skipping AI pass", flush=True)
-        return None
-
-    payload = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {
-            "temperature": 0.1,
-            "maxOutputTokens": 8192,
-            "responseMimeType": "application/json",
-        },
-    }
-
-    for attempt in range(1, GEMINI_MAX_RETRIES + 1):
-        try:
-            resp = requests.post(
-                GEMINI_URL,
-                json=payload,
-                timeout=GEMINI_TIMEOUT,
-                headers={"Content-Type": "application/json"},
-            )
-            if resp.status_code == 429:
-                wait = min(2 ** attempt * 5, 30)
-                print(f"[category_mapper] Gemini 429 rate limit, waiting {wait}s (attempt {attempt})", flush=True)
-                time.sleep(wait)
-                continue
-            if resp.status_code != 200:
-                print(f"[category_mapper] Gemini HTTP {resp.status_code}: {resp.text[:300]}", flush=True)
-                return None
-
-            data = resp.json()
-            candidates = data.get("candidates", [])
-            if not candidates:
-                print("[category_mapper] Gemini returned no candidates", flush=True)
-                return None
-
-            text = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "")
-            return text
-        except requests.exceptions.Timeout:
-            print(f"[category_mapper] Gemini timeout (attempt {attempt}/{GEMINI_MAX_RETRIES})", flush=True)
-        except requests.exceptions.RequestException as e:
-            print(f"[category_mapper] Gemini request error: {e}", flush=True)
-            return None
-
-    return None
 
 
 def _parse_ai_response(text: str) -> list[dict]:
@@ -486,7 +438,16 @@ def ai_pass(master_cats: list[dict], unmatched_cats: dict) -> list[dict]:
         )
 
         print(f"[category_mapper] AI batch {batch_num}/{total_batches} ({len(batch)} cats)...", flush=True)
-        response_text = _call_gemini(prompt)
+        response_text = traced_gemini_call(
+            name="category-mapping",
+            prompt=prompt,
+            gemini_url=GEMINI_URL,
+            gemini_api_key=GEMINI_API_KEY,
+            model=GEMINI_MODEL,
+            timeout=GEMINI_TIMEOUT,
+            max_retries=GEMINI_MAX_RETRIES,
+            metadata={"batch": batch_num, "total_batches": total_batches, "batch_size": len(batch)},
+        )
         parsed = _parse_ai_response(response_text)
 
         # Build source_id → source_type lookup for this batch
@@ -783,6 +744,7 @@ def run_category_mapping() -> dict:
     print(f"  Review queue: {stats['review_queue']}", flush=True)
     print(f"  Total mapped: {stats['total']}", flush=True)
 
+    langfuse_flush()
     return stats
 
 

@@ -18,3 +18,10 @@ tenacity==9.0.0
 
 # Logging
 structlog==24.4.0
+
+# LLM observability
+langfuse>=2.60,<3
+
+# Image processing (R2 upload + dimensions)
+boto3==1.42.81
+Pillow==12.1.1

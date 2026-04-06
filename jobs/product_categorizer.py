@@ -18,10 +18,9 @@ import re
 import time
 from urllib.parse import urlparse
 
-import requests
-
 sys.path.insert(0, "/app")
 from jobs.db import get_conn, put_conn
+from jobs.langfuse_wrapper import traced_gemini_call, flush as langfuse_flush
 
 
 # ---------------------------------------------------------------------------
@@ -443,55 +442,30 @@ def categorize_by_shop_mapping(products):
 # Signal 4: AI classification (Gemini Flash)
 # ---------------------------------------------------------------------------
 
-def _call_gemini(prompt, retries=AI_MAX_RETRIES):
-    """Call Gemini API with retry logic. Returns parsed JSON or None."""
+def _call_gemini_traced(prompt, batch_num=0, total_batches=0, batch_size=0):
+    """Call Gemini API with Langfuse tracing. Returns parsed JSON or None."""
     if not GEMINI_API_KEY:
         print("[categorizer] WARNING: GEMINI_API_KEY not set, skipping AI classification", flush=True)
         return None
 
-    payload = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {
-            "temperature": 0.1,
-            "maxOutputTokens": 8192,
-            "responseMimeType": "application/json",
-        }
-    }
+    response_text = traced_gemini_call(
+        name="product-categorization",
+        prompt=prompt,
+        gemini_url=GEMINI_URL,
+        gemini_api_key=GEMINI_API_KEY,
+        model=GEMINI_MODEL,
+        timeout=60,
+        max_retries=AI_MAX_RETRIES,
+        metadata={"batch": batch_num, "total_batches": total_batches, "batch_size": batch_size},
+    )
+    if not response_text:
+        return None
 
-    for attempt in range(1, retries + 1):
-        try:
-            resp = requests.post(
-                GEMINI_URL,
-                params={"key": GEMINI_API_KEY},
-                json=payload,
-                timeout=60,
-            )
-            if resp.status_code == 429:
-                wait = AI_RETRY_DELAY * attempt
-                print(f"[categorizer] Gemini rate limited, waiting {wait}s (attempt {attempt}/{retries})", flush=True)
-                time.sleep(wait)
-                continue
-
-            if resp.status_code != 200:
-                print(f"[categorizer] Gemini API error {resp.status_code}: {resp.text[:200]}", flush=True)
-                if attempt < retries:
-                    time.sleep(AI_RETRY_DELAY)
-                continue
-
-            data = resp.json()
-            text = data["candidates"][0]["content"]["parts"][0]["text"]
-            return json.loads(text)
-
-        except (json.JSONDecodeError, KeyError, IndexError) as e:
-            print(f"[categorizer] Gemini parse error (attempt {attempt}): {e}", flush=True)
-            if attempt < retries:
-                time.sleep(AI_RETRY_DELAY)
-        except requests.RequestException as e:
-            print(f"[categorizer] Gemini request error (attempt {attempt}): {e}", flush=True)
-            if attempt < retries:
-                time.sleep(AI_RETRY_DELAY)
-
-    return None
+    try:
+        return json.loads(response_text)
+    except (json.JSONDecodeError, ValueError) as e:
+        print(f"[categorizer] Gemini parse error: {e}", flush=True)
+        return None
 
 
 def categorize_by_ai(products, master_cats, slug_map):
@@ -544,7 +518,12 @@ Rules:
 Example output:
 [{{"product_id": 1, "category_id": 5, "confidence": 0.92}}]"""
 
-        result = _call_gemini(prompt)
+        result = _call_gemini_traced(
+            prompt,
+            batch_num=i // AI_BATCH_SIZE + 1,
+            total_batches=(len(products) - 1) // AI_BATCH_SIZE + 1,
+            batch_size=len(batch),
+        )
         if not result or not isinstance(result, list):
             print(f"[categorizer] AI batch {i // AI_BATCH_SIZE + 1}: no valid response", flush=True)
             continue
@@ -681,6 +660,7 @@ def run_product_categorizer(batch_size=BATCH_SIZE):
     print(f"  Classification:    {total_classified}/{stats['total']} "
           f"({total_classified / max(stats['total'], 1) * 100:.1f}%)", flush=True)
 
+    langfuse_flush()
     return stats
 
 

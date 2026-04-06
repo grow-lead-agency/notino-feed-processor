@@ -49,6 +49,10 @@ curl -s "$COOLIFY_API_URL/api/v1/deploy?uuid=rtgj2inqwjjsms4ifgfh5a05" \
 | `FIRECRAWL_API_KEY` | Firecrawl API key pro hard/protected shopy (CF challenge, DataDome) — fallback only |
 | `CRAWL4AI_URL` | Crawl4AI self-hosted URL (default: `http://crawl4ai:11235`) — primary scraping engine |
 | `OPENAI_API_KEY` | OpenAI API key pro Crawl4AI LLM extraction (gpt-4o-mini) |
+| `GEMINI_API_KEY` | Google Gemini API key pro category mapper + product categorizer |
+| `LANGFUSE_PUBLIC_KEY` | Langfuse public key (z langfuse.growlead.cz) |
+| `LANGFUSE_SECRET_KEY` | Langfuse secret key |
+| `LANGFUSE_HOST` | Langfuse URL (default: `https://langfuse.growlead.cz`) |
 
 ## Redis (Coolify-managed)
 

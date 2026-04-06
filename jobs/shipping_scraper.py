@@ -37,7 +37,7 @@ FIRECRAWL_API_URL = "https://api.firecrawl.dev/v1/scrape"
 FIRECRAWL_API_KEY = os.environ.get("FIRECRAWL_API_KEY", "").strip()
 
 MAX_SHOPS_PER_RUN = 50          # raised from 20 — Crawl4AI is free
-MAX_CONCURRENT_WORKERS = 8      # raised from 4 — node-03 has 16 cores, 25GB RAM free
+MAX_CONCURRENT_WORKERS = 30     # node-03 has 16 cores, 25GB RAM free — Crawl4AI handles concurrency
 FIRECRAWL_TIMEOUT_SECONDS = 60
 FIRECRAWL_MAX_RETRIES = 2
 
@@ -349,8 +349,8 @@ def resolve_carrier_id(service_name: str | None, carrier_map: dict[str, int]) ->
 
 def get_shops_to_scrape(limit: int = MAX_SHOPS_PER_RUN) -> list[tuple]:
     """
-    Load shops without shipping data.
-    Priority: biggest shops first (have URL, have offers already).
+    Load shops needing shipping data.
+    Priority: never-checked first, then stale (>90 days).
     """
     conn = get_conn()
     try:
@@ -360,11 +360,15 @@ def get_shops_to_scrape(limit: int = MAX_SHOPS_PER_RUN) -> list[tuple]:
                 SELECT id, name, url, country_id
                 FROM shops
                 WHERE deleted_at IS NULL
-                  AND shipping_checked_at IS NULL
                   AND url IS NOT NULL
+                  AND (
+                      shipping_checked_at IS NULL
+                      OR shipping_checked_at < NOW() - INTERVAL '90 days'
+                  )
                 ORDER BY
-                    (offers_checked_at IS NOT NULL) DESC,  -- prefer shops we're already scraping
-                    id
+                    shipping_checked_at IS NULL DESC,       -- never-checked first
+                    (offers_checked_at IS NOT NULL) DESC,   -- prefer active shops
+                    shipping_checked_at ASC NULLS FIRST     -- oldest check first
                 LIMIT %s
                 """,
                 (limit,),

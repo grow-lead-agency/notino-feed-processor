@@ -533,6 +533,10 @@ def mark_shop_checked(shop_id: int) -> None:
 # Shop loader
 # ----------------------------------------------------------------------------
 def get_shops_to_scrape(limit: int = MAX_SHOPS_PER_RUN) -> list[tuple]:
+    """
+    Load shops needing legal data.
+    Priority: never-checked first, then stale (>180 days — legal info changes rarely).
+    """
     conn = get_conn()
     try:
         with conn.cursor() as cur:
@@ -541,11 +545,15 @@ def get_shops_to_scrape(limit: int = MAX_SHOPS_PER_RUN) -> list[tuple]:
                 SELECT id, name, url, country_id
                 FROM shops
                 WHERE deleted_at IS NULL
-                  AND legal_checked_at IS NULL
                   AND url IS NOT NULL
+                  AND (
+                      legal_checked_at IS NULL
+                      OR legal_checked_at < NOW() - INTERVAL '180 days'
+                  )
                 ORDER BY
+                    legal_checked_at IS NULL DESC,
                     (offers_checked_at IS NOT NULL) DESC,
-                    id
+                    legal_checked_at ASC NULLS FIRST
                 LIMIT %s
                 """,
                 (limit,),

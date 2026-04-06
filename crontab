@@ -20,6 +20,14 @@
 # Firecrawl — hard/blocked shops (nightly, uses own budget system)
 0 3 * * * python /app/jobs/firecrawl_scraper.py >> /proc/1/fd/1 2>&1
 
+# Shipping scraper — hourly, batch of 20 shops per run (skips already-checked via shipping_checked_at)
+# Discovers shipping page URL, extracts zones + methods via Firecrawl AI extraction
+15 * * * * flock -n /tmp/shipping_scraper.lock python /app/jobs/shipping_scraper.py >> /proc/1/fd/1 2>&1
+
+# Legal entity scraper — hourly (+30m offset), batch of 20 shops per run
+# Discovers imprint page URL, extracts legal_name/VAT/reg_number via Firecrawl AI extraction
+45 * * * * flock -n /tmp/legal_scraper.lock python /app/jobs/legal_scraper.py >> /proc/1/fd/1 2>&1
+
 # Affiliate XML feeds — po registraci aktivovat
 # 0 4 * * * python /app/jobs/affiliate_feeds.py >> /proc/1/fd/1 2>&1
 

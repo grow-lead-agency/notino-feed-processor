@@ -21,6 +21,8 @@ Běží na Coolify (growlead-node-03). Zapisuje do Neon PG `notino-datamining`.
 | Hlídač Shopů | `jobs/hlidac_shopu.py` | denně 4:00 | Volá API `api.hlidacshopu.cz/v2/detail` pro CZ/SK price history |
 | Affiliate feeds | `jobs/affiliate_feeds.py` | 6h | Stahuje Awin/CJ XML feedy (DISABLED — čeká na registraci) |
 | Firecrawl scraper | `jobs/firecrawl_scraper.py` | denně 3:00 | Managed scraping přes Firecrawl API — hard shopy s CF challenge/DataDome, source='firecrawl_jsonld' |
+| Shipping scraper | `jobs/shipping_scraper.py` | hodinově :15 | Scrape shipping info stránek — extrahuje shipping_zones + shipping_methods přes Firecrawl AI extraction. Batch 20 shopů/run. |
+| Legal scraper | `jobs/legal_scraper.py` | hodinově :45 | Scrape imprint stránek — extrahuje legal_name, VAT ID, IČO přes Firecrawl AI extraction. Batch 20 shopů/run. |
 | Sitemap diff | integrováno v sitemap_crawler | denně | Detekuje nové/smazané produkty |
 
 ## Deploy
@@ -103,6 +105,8 @@ Sdílená DB pro všechny Notino tooly: `DEV/clients/notino/db/`
 Schema, migrace, README — vše tam. Feed-processor zapisuje do:
 - `products`, `product_offers`, `offer_price_history` (core)
 - `brands` (auto-create)
+- `shipping_zones`, `shipping_methods` (shipping scraper)
+- `legal_entities` + `shops.legal_entity_id` (legal scraper)
 - `scrape_run_metrics`, `firecrawl_usage` (monitoring)
 - `sitemap_crawl_log`, `hlidac_shopu_data` (enrichment)
 

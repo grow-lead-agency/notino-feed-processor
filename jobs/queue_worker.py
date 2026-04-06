@@ -67,19 +67,62 @@ class LockRenewer:
             renew_lock(self._r, self._job_id)
 
 
+def _check_firecrawl_budget() -> bool:
+    """Check if daily Firecrawl budget is exceeded. Returns True if OK to proceed."""
+    from jobs.db import get_conn, put_conn
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT firecrawl_daily_budget_usd, firecrawl_daily_spent_usd,
+                       firecrawl_daily_spent_reset_at
+                FROM pipeline_config WHERE id = 1
+            """)
+            row = cur.fetchone()
+            if not row:
+                return True
+            budget, spent, reset_at = row
+            # Reset daily counter if new day
+            from datetime import datetime, timezone
+            if reset_at.date() < datetime.now(timezone.utc).date():
+                cur.execute("""
+                    UPDATE pipeline_config
+                    SET firecrawl_daily_spent_usd = 0, firecrawl_daily_spent_reset_at = now()
+                    WHERE id = 1
+                """)
+                conn.commit()
+                spent = 0
+            return spent < budget
+    except Exception as e:
+        print(f"[budget-check] Error: {e}, allowing job", flush=True)
+        return True
+    finally:
+        put_conn(conn)
+
+
+def _record_firecrawl_spend(credits: int):
+    """Add credits to daily Firecrawl spend counter."""
+    from jobs.db import get_conn, put_conn
+    cost = credits * 0.01
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE pipeline_config
+                SET firecrawl_daily_spent_usd = firecrawl_daily_spent_usd + %s
+                WHERE id = 1
+            """, (cost,))
+        conn.commit()
+    except Exception:
+        pass
+    finally:
+        put_conn(conn)
+
+
 def process_job(job: dict) -> dict:
     """Route job to correct scraper based on scrape_type, return result dict.
 
-    Routing:
-      - catalog_sync → jsonld_scraper or firecrawl_scraper (based on scraper_engine/difficulty)
-      - price_check  → jsonld_scraper or firecrawl_scraper (same engines, price-only mode)
-      - category_tree → category_tree_scraper (3 strategies: BreadcrumbList, sitemap, Firecrawl map)
-      - voucher_scan → voucher_scraper (homepage promos + voucher aggregator sites)
-      - shop_profile → shop_profile_scraper (about/payment/returns/usps/loyalty via Firecrawl AI extract)
-      - review_harvest → review_harvester (Trustpilot, Heureka, Zbozi, JSON-LD product reviews)
-      - ingredient_extract → ingredient_extractor (INCI extraction from product pages, regex + Firecrawl AI)
-      - shipping_intel,
-        availability_pulse, product_detail → NotImplementedError
+    Firecrawl jobs check daily budget before proceeding.
     """
     shop_id = job["shop_id"]
     domain = job["domain"]
@@ -88,6 +131,12 @@ def process_job(job: dict) -> dict:
     difficulty = job.get("difficulty", "easy")
     scrape_type = job.get("scrape_type", "catalog_sync")
     scraper_engine = job.get("scraper_engine", "jsonld")
+
+    # Budget gate for Firecrawl jobs
+    if scraper_engine == "firecrawl" or difficulty in ("hard", "blocked"):
+        if not _check_firecrawl_budget():
+            print(f"[{WORKER_ID}] SKIP {domain} [{scrape_type}] — daily Firecrawl budget exceeded", flush=True)
+            return {"saved": 0, "domain": domain, "scrape_type": scrape_type, "skipped": "budget"}
 
     if scrape_type == "catalog_sync":
         saved = _run_catalog_sync(shop_id, domain, feed_url, country_id, difficulty, scraper_engine)

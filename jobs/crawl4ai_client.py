@@ -147,16 +147,19 @@ def crawl4ai_scrape(
 
             results = body.get("results", [])
             if not results:
+                print(f"[crawl4ai] No results for {url}", flush=True)
                 gen.end(level="WARNING", status_message="No results")
                 return None
 
             result = results[0]
             if not result.get("success"):
+                print(f"[crawl4ai] Extraction failed for {url}: success=False, error={result.get('error', 'unknown')}", flush=True)
                 gen.end(level="WARNING", status_message="Extraction not successful")
                 return None
 
             extracted = result.get("extracted_content")
             if not extracted:
+                print(f"[crawl4ai] No extracted_content for {url} (success=True but empty)", flush=True)
                 gen.end(level="WARNING", status_message="No extracted content")
                 return None
 

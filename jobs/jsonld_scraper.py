@@ -22,8 +22,8 @@ from jobs.db import upsert_product_with_offer, get_conn
 USER_AGENT_PRODUCT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
 USER_AGENT_BOT = "Mozilla/5.0 (compatible; Googlebot/2.1)"
 MAX_PRODUCTS_PER_SHOP = 50000  # Full download — Neon Launch plan (10 GB) handles it
-MAX_WORKERS = 15               # Node-03 has 8 cores, 11 GB free RAM — can handle it
-REQUEST_DELAY = 0.1            # 100ms delay = ~150 req/s total (polite enough)
+MAX_WORKERS = 30               # Node-03 upgraded to CPX62: 16 cores, 32 GB RAM
+REQUEST_DELAY = 0.05           # 50ms delay = ~600 req/s max (still polite per shop)
 MAX_TOTAL_PRODUCTS = 500000    # Safety cap per run
 
 # Run metrics

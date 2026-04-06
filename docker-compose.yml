@@ -38,16 +38,15 @@ services:
       - feed-processor-feeds:/app/feeds
       - feed-processor-config:/app/config
 
-    # Resource limits — node-03 has 8 cores, 15 GB RAM
-    # Full scrape: 15 workers × 12K URLs per shop = needs CPU + RAM
+    # Resource limits — node-03 upgraded to CPX62: 16 cores, 32 GB RAM, 640 GB disk
     deploy:
       resources:
         limits:
-          cpus: "6.0"
-          memory: 6G
+          cpus: "12.0"
+          memory: 16G
         reservations:
-          cpus: "1.0"
-          memory: 1G
+          cpus: "2.0"
+          memory: 2G
 
     healthcheck:
       test: ["CMD", "python", "-c", "import psycopg2; import os; psycopg2.connect(os.environ['DATABASE_URL'])"]

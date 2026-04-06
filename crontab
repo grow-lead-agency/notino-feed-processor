@@ -49,6 +49,22 @@
 # Keyword extraction — daily at 5 AM (after overnight scraping)
 0 5 * * * flock -n /tmp/keyword_extractor.lock python /app/jobs/keyword_extractor.py >> /proc/1/fd/1 2>&1
 
+# ── CATEGORY & SEO PIPELINE (daily chain: categories → mapping → products → landing pages) ──
+# Category tree scraper — daily at 4 AM, batch 30 shops
+0 4 * * * flock -n /tmp/category_tree.lock python /app/jobs/category_tree_scraper.py >> /proc/1/fd/1 2>&1
+
+# Category mapper — daily at 4:30 AM (after category tree)
+30 4 * * * flock -n /tmp/category_mapper.lock python /app/jobs/category_mapper.py >> /proc/1/fd/1 2>&1
+
+# Product categorizer — daily at 5:30 AM (after mapper + keyword extractor)
+30 5 * * * flock -n /tmp/product_categorizer.lock python /app/jobs/product_categorizer.py >> /proc/1/fd/1 2>&1
+
+# SEO landing page generator — daily at 6 AM (after categorizer)
+0 6 * * * flock -n /tmp/seo_landing.lock python /app/jobs/seo_landing_generator.py >> /proc/1/fd/1 2>&1
+
+# Sitemap discovery — weekly Sunday 3 AM (find new feeds for shops without sitemap)
+0 3 * * 0 flock -n /tmp/sitemap_discovery.lock python /app/jobs/sitemap_discovery.py --limit 200 >> /proc/1/fd/1 2>&1
+
 # ── DISABLED (waiting for setup) ───────────────────────────────────
 # Affiliate XML feeds — aktivovat po Awin/CJ registraci
 # 0 */4 * * * python /app/jobs/affiliate_feeds.py >> /proc/1/fd/1 2>&1

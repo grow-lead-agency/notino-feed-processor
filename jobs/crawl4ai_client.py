@@ -149,6 +149,12 @@ def crawl4ai_scrape(
             except (json.JSONDecodeError, ValueError):
                 return None
 
+        # LLMExtractionStrategy may return a list — unwrap first item
+        if isinstance(extracted, list):
+            if not extracted:
+                return None
+            extracted = extracted[0]
+
         return extracted
 
     return None

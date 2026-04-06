@@ -18,6 +18,7 @@ Cron: hodinově — zpracovává batch ~20 shopů per run.
 Batch size zvýšen z 20 na 50 díky Crawl4AI ($0 cost).
 """
 import os
+import re
 import sys
 import time
 import unicodedata
@@ -28,6 +29,7 @@ import requests
 sys.path.insert(0, "/app")
 from jobs.db import get_conn, put_conn
 from jobs.crawl4ai_client import crawl4ai_scrape, crawl4ai_health
+from jobs.langfuse_wrapper import traced_generation
 
 
 # ----------------------------------------------------------------------------
@@ -44,33 +46,39 @@ FIRECRAWL_MAX_RETRIES = 2
 # Engine selection — Crawl4AI first, Firecrawl fallback
 _USE_CRAWL4AI = None  # lazy init
 
-# Path candidates for shipping info page (first found = used)
-# Ordered by specificity: longer/more specific first to avoid matching home pages.
-SHIPPING_PATH_CANDIDATES = [
+# Keywords that indicate a shipping/delivery page — used for link discovery in HTML.
+# Multilingual: matches href text OR URL path substring.
+SHIPPING_KEYWORDS = [
     # CZ/SK
-    "doprava-a-platba", "doprava", "doruceni", "zpusoby-doruceni",
-    "jak-nakoupit", "obchodni-podminky/doprava",
+    "doprava", "doruceni", "doručení", "zásilk", "přeprava",
     # EN
-    "shipping", "shipping-info", "delivery", "delivery-information",
-    "shipping-and-returns", "shipping-delivery", "shipping-policy",
+    "shipping", "delivery", "postage", "dispatch",
     # DE
-    "versand", "versandkosten", "versand-und-zahlung", "lieferung", "liefer-und-versandkosten",
+    "versand", "lieferung", "versandkosten",
     # FR
-    "livraison", "frais-de-livraison", "expedition",
+    "livraison", "expédition", "expedition",
     # IT
-    "spedizione", "spedizioni", "consegna",
+    "spedizione", "consegna",
     # ES
-    "envios", "envio", "gastos-de-envio", "entrega",
+    "envío", "envio", "entrega",
     # NL
-    "verzending", "verzendkosten", "bezorging",
+    "verzending", "bezorging",
     # PL
-    "dostawa", "wysylka", "koszty-dostawy",
+    "dostawa", "wysyłka", "wysylka",
     # Nordic
-    "frakt", "fraktinformation", "leverans",
+    "frakt", "leverans",
     # HU
-    "szallitas", "szallitasi-feltetelek",
+    "szállítás", "szallitas",
+    # PT
+    "envio", "entrega",
+    # RO
+    "livrare",
+    # BG
+    "доставка",
+    # HR/SI
+    "dostava", "pošiljanje",
     # Generic
-    "info/shipping", "help/shipping", "customer-service/shipping",
+    "shipping", "delivery",
 ]
 
 # Extraction schema for Firecrawl AI
@@ -177,7 +185,7 @@ def _scrape_via_crawl4ai(url: str) -> dict | None:
 
 
 def _scrape_via_firecrawl(url: str) -> dict | None:
-    """Scrape shipping page via Firecrawl cloud API (paid fallback)."""
+    """Scrape shipping page via Firecrawl cloud API (paid fallback). Traced via Langfuse."""
     if not FIRECRAWL_API_KEY:
         print("[shipping] FATAL: FIRECRAWL_API_KEY missing", flush=True)
         return None
@@ -199,52 +207,69 @@ def _scrape_via_firecrawl(url: str) -> dict | None:
         "Content-Type": "application/json",
     }
 
-    for attempt in range(FIRECRAWL_MAX_RETRIES + 1):
-        try:
-            resp = requests.post(
-                FIRECRAWL_API_URL,
-                headers=headers,
-                json=payload,
-                timeout=FIRECRAWL_TIMEOUT_SECONDS + 10,
-            )
-        except requests.RequestException as e:
-            if attempt < FIRECRAWL_MAX_RETRIES:
-                time.sleep(2 ** attempt)
-                continue
-            print(f"[shipping] Network error for {url}: {e}", flush=True)
-            return None
+    with traced_generation(
+        name="firecrawl-shipping",
+        model="firecrawl/extract",
+        input_data={"url": url, "prompt": SHIPPING_PROMPT},
+        metadata={"job": "shipping_scraper", "engine": "firecrawl-fallback"},
+        tags=["feed-processor", "firecrawl", "shipping"],
+    ) as gen:
+        for attempt in range(FIRECRAWL_MAX_RETRIES + 1):
+            try:
+                resp = requests.post(
+                    FIRECRAWL_API_URL,
+                    headers=headers,
+                    json=payload,
+                    timeout=FIRECRAWL_TIMEOUT_SECONDS + 10,
+                )
+            except requests.RequestException as e:
+                if attempt < FIRECRAWL_MAX_RETRIES:
+                    time.sleep(2 ** attempt)
+                    continue
+                print(f"[shipping] Network error for {url}: {e}", flush=True)
+                gen.end(level="ERROR", status_message=f"Network error: {e}")
+                return None
 
-        if resp.status_code == 429:
-            if attempt < FIRECRAWL_MAX_RETRIES:
-                wait = int(resp.headers.get("Retry-After", 2 ** (attempt + 2)))
-                time.sleep(min(wait, 30))
-                continue
-            return None
+            if resp.status_code == 429:
+                if attempt < FIRECRAWL_MAX_RETRIES:
+                    wait = int(resp.headers.get("Retry-After", 2 ** (attempt + 2)))
+                    time.sleep(min(wait, 30))
+                    continue
+                gen.end(level="ERROR", status_message="429 rate limited, retries exhausted")
+                return None
 
-        if resp.status_code in (403, 404):
-            return None
+            if resp.status_code in (403, 404):
+                gen.end(level="WARNING", status_message=f"HTTP {resp.status_code}")
+                return None
 
-        if resp.status_code >= 500:
-            if attempt < FIRECRAWL_MAX_RETRIES:
-                time.sleep(2 ** attempt)
-                continue
-            return None
+            if resp.status_code >= 500:
+                if attempt < FIRECRAWL_MAX_RETRIES:
+                    time.sleep(2 ** attempt)
+                    continue
+                gen.end(level="ERROR", status_message=f"HTTP {resp.status_code} after retries")
+                return None
 
-        if resp.status_code != 200:
-            return None
+            if resp.status_code != 200:
+                gen.end(level="WARNING", status_message=f"HTTP {resp.status_code}")
+                return None
 
-        try:
-            body = resp.json()
-        except ValueError:
-            return None
+            try:
+                body = resp.json()
+            except ValueError:
+                gen.end(level="ERROR", status_message="Invalid JSON response")
+                return None
 
-        if not body.get("success"):
-            return None
+            if not body.get("success"):
+                gen.end(level="WARNING", status_message="Firecrawl success=false")
+                return None
 
-        data = body.get("data") or {}
-        return data.get("json")
+            data = body.get("data") or {}
+            result = data.get("json")
+            gen.end(output=result, usage={"total": 1})
+            return result
 
-    return None
+        gen.end(level="ERROR", status_message="All retries exhausted")
+        return None
 
 
 def scrape_shipping(url: str) -> dict | None:
@@ -260,34 +285,118 @@ def scrape_shipping(url: str) -> dict | None:
 
 
 # ----------------------------------------------------------------------------
-# URL discovery
+# URL discovery — smart link search (replaces brute-force path guessing)
 # ----------------------------------------------------------------------------
-def candidate_urls(shop_url: str) -> list[str]:
-    """Build list of candidate shipping page URLs."""
-    base = shop_url.rstrip("/")
-    return [f"{base}/{path}" for path in SHIPPING_PATH_CANDIDATES]
+def _find_shipping_links_in_html(html: str, base_url: str) -> list[str]:
+    """
+    Parse HTML and find links that look like shipping/delivery pages.
+    Matches both link text and href path against SHIPPING_KEYWORDS.
+    Returns deduplicated list of absolute URLs, best matches first.
+    """
+    from urllib.parse import urljoin, urlparse
+
+    base_domain = urlparse(base_url).netloc
+
+    # Find all <a> tags with href
+    link_pattern = re.compile(
+        r'<a\s[^>]*href=["\']([^"\'#]+)["\'][^>]*>(.*?)</a>',
+        re.IGNORECASE | re.DOTALL,
+    )
+
+    scored: list[tuple[int, str]] = []
+    seen = set()
+
+    for match in link_pattern.finditer(html):
+        href_raw = match.group(1).strip()
+        link_text = re.sub(r"<[^>]+>", "", match.group(2)).strip().lower()
+
+        # Build absolute URL
+        abs_url = urljoin(base_url, href_raw)
+        parsed = urlparse(abs_url)
+
+        # Skip external links, anchors, mailto, tel
+        if parsed.scheme not in ("http", "https"):
+            continue
+        if parsed.netloc and parsed.netloc != base_domain:
+            continue
+
+        # Skip media, product, category pages
+        path_lower = parsed.path.lower()
+        if any(ext in path_lower for ext in (".jpg", ".png", ".pdf", ".css", ".js")):
+            continue
+
+        # Dedup
+        if abs_url in seen:
+            continue
+        seen.add(abs_url)
+
+        # Score: how many shipping keywords match in link text + path
+        score = 0
+        for kw in SHIPPING_KEYWORDS:
+            kw_lower = kw.lower()
+            if kw_lower in link_text:
+                score += 3  # text match is strongest signal
+            if kw_lower in path_lower:
+                score += 2  # path match
+
+        # Negative signals — avoid these pages
+        for neg in ("privacy", "datenschutz", "cookie", "login", "account", "cart", "checkout", "produkt", "product", "kategori", "category"):
+            if neg in path_lower or neg in link_text:
+                score -= 5
+
+        if score > 0:
+            scored.append((score, abs_url))
+
+    # Sort by score descending, take top 5
+    scored.sort(key=lambda x: -x[0])
+    return [url for _, url in scored[:5]]
 
 
 def find_shipping_page(shop_url: str) -> tuple[str | None, dict | None]:
     """
-    Try candidate URLs one by one. First URL that returns a usable JSON
-    (at least 1 zone) wins. Returns (url_used, extracted_json).
-    Aborts after first successful extraction to save Firecrawl credits.
+    Smart shipping page discovery:
+      1. Fetch homepage HTML via Crawl4AI (no LLM, $0)
+      2. Find shipping links by keyword matching in <a> tags
+      3. Try top candidates with LLM extraction (max 3 attempts)
+
+    Returns (url_used, extracted_json) or (None, None).
     """
-    for url in candidate_urls(shop_url):
-        # Cheap HEAD check first to avoid wasting Firecrawl credits on 404s
+    from jobs.crawl4ai_client import crawl4ai_scrape_html
+
+    base = shop_url.rstrip("/")
+
+    # Step 1: Fetch homepage HTML
+    html = crawl4ai_scrape_html(base, timeout=30)
+
+    # Fallback: plain HTTP if Crawl4AI HTML fails
+    if not html:
         try:
-            head = requests.head(
-                url,
+            resp = requests.get(
+                base,
                 headers={"User-Agent": "Mozilla/5.0 (compatible; Googlebot/2.1)"},
-                timeout=10,
+                timeout=15,
                 allow_redirects=True,
             )
-            if head.status_code >= 400:
-                continue
+            if resp.status_code == 200:
+                html = resp.text
         except requests.RequestException:
-            continue
+            pass
 
+    if not html:
+        print(f"  [discovery] Could not fetch homepage for {base}", flush=True)
+        return None, None
+
+    # Step 2: Find shipping links in HTML
+    candidates = _find_shipping_links_in_html(html, base)
+
+    if not candidates:
+        print(f"  [discovery] No shipping links found on {base}", flush=True)
+        return None, None
+
+    print(f"  [discovery] Found {len(candidates)} candidates: {[c.split('/')[-1] for c in candidates]}", flush=True)
+
+    # Step 3: Try top candidates with LLM extraction (max 3)
+    for url in candidates[:3]:
         data = scrape_shipping(url)
         if data and isinstance(data.get("zones"), list) and len(data["zones"]) > 0:
             return url, data

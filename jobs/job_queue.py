@@ -459,6 +459,28 @@ def flush_queue(r):
 
 
 # ============================================================
+# ENGINE CONCURRENCY HELPERS
+# ============================================================
+
+def _count_firecrawl_jobs(r) -> int:
+    """Count Firecrawl jobs currently in waiting + active queues."""
+    count = 0
+    # Check waiting queue
+    waiting_ids = r.zrange(f"{PREFIX}:waiting", 0, -1)
+    for job_id in waiting_ids:
+        job_data = r.hgetall(f"{PREFIX}:job:{job_id}")
+        if job_data and job_data.get("scraper_engine") == "firecrawl":
+            count += 1
+    # Check active queue
+    active_ids = r.hkeys(f"{PREFIX}:active")
+    for job_id in active_ids:
+        job_data = r.hgetall(f"{PREFIX}:job:{job_id}")
+        if job_data and job_data.get("scraper_engine") == "firecrawl":
+            count += 1
+    return count
+
+
+# ============================================================
 # SCHEDULER (enqueue due jobs from shop_scrape_config)
 # ============================================================
 
@@ -544,12 +566,26 @@ def schedule_due_jobs(r) -> int:
     finally:
         put_conn(conn)
 
+    # Engine-aware concurrency: limit how many Firecrawl jobs can be enqueued
+    # to prevent 429 rate limiting and budget blowout.
+    MAX_FIRECRAWL_CONCURRENT = 3  # max Firecrawl jobs in waiting+active at once
+    firecrawl_in_queue = _count_firecrawl_jobs(r)
+
     enqueued = 0
+    firecrawl_enqueued = 0
+    firecrawl_skipped = 0
+
     for row in rows:
         (config_id, shop_id, shop_name, shop_url, category, country_id,
          scrape_type, priority, scraper_engine, max_items,
          config_override, last_success_at, interval_hours,
          feed_url, difficulty) = row
+
+        # Firecrawl concurrency gate
+        if scraper_engine == "firecrawl":
+            if firecrawl_in_queue + firecrawl_enqueued >= MAX_FIRECRAWL_CONCURRENT:
+                firecrawl_skipped += 1
+                continue  # skip — will be picked up next scheduler run
 
         # Determine feed_url: from config_override first, then website_checks
         effective_feed_url = ""
@@ -580,7 +616,12 @@ def schedule_due_jobs(r) -> int:
 
         if enqueue(r, job):
             enqueued += 1
+            if scraper_engine == "firecrawl":
+                firecrawl_enqueued += 1
             print(f"  [ENQUEUE] {shop_name} [{scrape_type}] priority={priority} engine={scraper_engine}", flush=True)
+
+    if firecrawl_skipped:
+        print(f"  [THROTTLE] Skipped {firecrawl_skipped} firecrawl jobs (max {MAX_FIRECRAWL_CONCURRENT} concurrent, {firecrawl_in_queue} already queued)", flush=True)
 
     return enqueued
 

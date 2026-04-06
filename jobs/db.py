@@ -166,10 +166,12 @@ def upsert_offer(*, product_id, shop_id, country_id, external_sku=None,
 
     with get_conn() as conn:
         with conn.cursor() as cur:
+            # Try match by SKU first, then by URL (fallback for NULL SKU)
             cur.execute(
                 "SELECT id, price, availability FROM product_offers "
-                "WHERE shop_id=%s AND external_sku=%s AND country_id=%s",
-                (shop_id, external_sku, country_id)
+                "WHERE shop_id=%s AND (external_sku=%s OR product_url=%s) AND country_id=%s "
+                "LIMIT 1",
+                (shop_id, external_sku, product_url, country_id)
             )
             existing = cur.fetchone()
 
@@ -209,6 +211,13 @@ def upsert_offer(*, product_id, shop_id, country_id, external_sku=None,
                         availability, volume_ml_snapshot, unit_price_per_ml,
                         affiliate_url, source, raw_offer_data
                     ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::availability_status,%s,%s,%s,%s::feed_source,%s)
+                    ON CONFLICT (shop_id, product_url) DO UPDATE SET
+                        price = EXCLUDED.price,
+                        sale_price = EXCLUDED.sale_price,
+                        availability = EXCLUDED.availability,
+                        last_seen_at = NOW(),
+                        updated_at = NOW(),
+                        is_active = TRUE
                     RETURNING id""",
                     (product_id, shop_id, country_id, external_sku, offer_title, product_url, image_url,
                      price, sale_price, price_currency, availability_enum,

@@ -137,18 +137,21 @@ def is_valid_keyword(kw: str) -> bool:
 # Extraction functions
 # ---------------------------------------------------------------------------
 
-def extract_from_products(conn, limit: int = PRODUCT_BATCH_SIZE) -> list[dict]:
+def extract_from_products(conn, limit: int = PRODUCT_BATCH_SIZE, max_products: int = 15000) -> list[dict]:
     """
     Extract keywords from product titles + brand names.
-    Processes in batches of `limit`.
+    Processes in batches of `limit`, up to `max_products` total.
+    Prioritizes products from top brands (most offers).
     Returns list of keyword dicts.
     """
     keywords = []
     offset = 0
     batch_num = 0
+    total_processed = 0
 
-    while True:
+    while total_processed < max_products:
         batch_num += 1
+        remaining = min(limit, max_products - total_processed)
         with conn.cursor() as cur:
             cur.execute("""
                 SELECT p.id, p.title, b.name AS brand_name
@@ -157,7 +160,7 @@ def extract_from_products(conn, limit: int = PRODUCT_BATCH_SIZE) -> list[dict]:
                 WHERE p.deleted_at IS NULL AND p.title IS NOT NULL
                 ORDER BY p.id
                 LIMIT %s OFFSET %s
-            """, (limit, offset))
+            """, (remaining, offset))
             rows = cur.fetchall()
 
         if not rows:
@@ -206,19 +209,11 @@ def extract_from_products(conn, limit: int = PRODUCT_BATCH_SIZE) -> list[dict]:
                         "related_product_id": product_id,
                     })
 
-            # 4. N-grams (2-gram, 3-gram) from title words
-            words = title.lower().split()
-            if len(words) >= 3:
-                for ngram in extract_ngrams(words, 2, 3):
-                    if is_valid_keyword(ngram):
-                        keywords.append({
-                            "keyword": ngram,
-                            "source": "product_title",
-                            "lang": lang,
-                            "brand_name": brand_name,
-                        })
+            # 4. N-grams skipped in batch mode (too many candidates)
+            # Will be added in future incremental enrichment runs.
 
-        offset += limit
+        offset += remaining
+        total_processed += len(rows)
 
     print(f"  Products: extracted {len(keywords)} keyword candidates", flush=True)
     return keywords
@@ -256,15 +251,17 @@ def extract_from_brand_category_combos(conn) -> list[dict]:
     """
     keywords = []
     with conn.cursor() as cur:
-        # Get top brands (those with actual products)
+        # Get top 300 brands by product count (avoids 900K+ combos)
         cur.execute("""
-            SELECT DISTINCT b.id, b.name
+            SELECT b.id, b.name, COUNT(p.id) as product_count
             FROM brands b
             INNER JOIN products p ON p.brand_id = b.id AND p.deleted_at IS NULL
             WHERE b.name IS NOT NULL AND b.name != ''
-            ORDER BY b.name
+            GROUP BY b.id, b.name
+            ORDER BY product_count DESC
+            LIMIT 300
         """)
-        brands = cur.fetchall()
+        brands = [(r[0], r[1]) for r in cur.fetchall()]
 
     print(f"  Brand x category: {len(brands)} brands x {len(CATEGORY_TRANSLATIONS)} categories", flush=True)
 

@@ -1,13 +1,21 @@
 """
 Langfuse LLM observability wrapper for Notino feed-processor.
 
-Centralizes all LLM calls (Gemini, OpenAI/Crawl4AI) with automatic tracing.
+Centralizes all LLM calls (OpenRouter, Gemini, Crawl4AI) with automatic tracing.
 Every call logs: model, prompt, response, tokens, latency, cost, errors.
 
 Usage:
-    from jobs.langfuse_wrapper import traced_gemini_call, traced_generation, get_langfuse
+    from jobs.langfuse_wrapper import traced_openrouter_call, traced_gemini_call, traced_generation, get_langfuse
 
-    # For Gemini HTTP calls:
+    # For OpenRouter calls (preferred — cheap open-source models):
+    response_text = traced_openrouter_call(
+        name="category-mapping",
+        prompt=prompt_text,
+        model="google/gemma-3-27b-it:free",
+        metadata={"batch": 1, "source": "category_mapper"},
+    )
+
+    # For Gemini HTTP calls (legacy):
     response_text = traced_gemini_call(
         name="category-mapping",
         prompt=prompt_text,
@@ -22,9 +30,11 @@ Usage:
         gen.end(output=result)
 
 Env vars (all optional — degrades gracefully if not set):
+    OPENROUTER_API_KEY   — OpenRouter API key (for cheap open-source models)
     LANGFUSE_SECRET_KEY  — Langfuse secret key
     LANGFUSE_PUBLIC_KEY  — Langfuse public key
     LANGFUSE_HOST        — Langfuse base URL (default: https://langfuse.growlead.cz)
+    GEMINI_API_KEY       — Google Gemini API key (legacy, still used by some jobs)
 """
 
 import json
@@ -77,6 +87,202 @@ def get_langfuse():
         _langfuse_enabled = False
         return None
 
+
+# ---------------------------------------------------------------------------
+# OpenRouter (preferred — cheap open-source models)
+# ---------------------------------------------------------------------------
+
+# Default model for classification/extraction tasks.
+# Mistral Small 3.1 24B: $0.03/M input, 131K context, great for structured output.
+# Free models (append :free) have strict rate limits — not viable for batch processing.
+# Override per-job via OPENROUTER_MODEL env or model= parameter.
+OPENROUTER_DEFAULT_MODEL = os.environ.get(
+    "OPENROUTER_MODEL", "mistralai/mistral-small-3.1-24b-instruct"
+)
+OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
+
+
+def traced_openrouter_call(
+    *,
+    name: str,
+    prompt: str,
+    model: str | None = None,
+    system_prompt: str | None = None,
+    temperature: float = 0.1,
+    max_tokens: int = 8192,
+    json_mode: bool = True,
+    timeout: int = 60,
+    max_retries: int = 2,
+    metadata: dict | None = None,
+) -> str | None:
+    """
+    Call OpenRouter API (OpenAI-compatible) with Langfuse tracing.
+
+    Drop-in replacement for traced_gemini_call(). Supports any model on OpenRouter
+    including free tiers (append :free to model ID).
+
+    Returns response text or None on failure.
+    """
+    import requests
+
+    api_key = os.environ.get("OPENROUTER_API_KEY", "")
+    if not api_key:
+        print(f"[{name}] WARNING: OPENROUTER_API_KEY not set, skipping", flush=True)
+        return None
+
+    model = model or OPENROUTER_DEFAULT_MODEL
+
+    lf = get_langfuse()
+    trace = None
+    generation = None
+
+    if lf:
+        trace = lf.trace(
+            name=f"openrouter/{name}",
+            metadata=metadata or {},
+            tags=["feed-processor", "openrouter"],
+        )
+        generation = trace.generation(
+            name=name,
+            model=model,
+            input=prompt,
+            metadata=metadata or {},
+        )
+
+    messages = []
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+    messages.append({"role": "user", "content": prompt})
+
+    payload = {
+        "model": model,
+        "messages": messages,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+    }
+    if json_mode:
+        payload["response_format"] = {"type": "json_object"}
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://growlead.dev",
+        "X-Title": "EcomRadar Feed Processor",
+    }
+
+    start_time = time.time()
+    last_error = None
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            resp = requests.post(
+                OPENROUTER_API_URL,
+                json=payload,
+                headers=headers,
+                timeout=timeout,
+            )
+
+            if resp.status_code == 429:
+                wait = min(2 ** attempt * 5, 30)
+                print(f"[{name}] OpenRouter 429 rate limit, waiting {wait}s (attempt {attempt})", flush=True)
+                time.sleep(wait)
+                last_error = f"429 rate limit (attempt {attempt})"
+                continue
+
+            if resp.status_code != 200:
+                last_error = f"HTTP {resp.status_code}: {resp.text[:300]}"
+                print(f"[{name}] OpenRouter {last_error}", flush=True)
+                if generation:
+                    generation.end(
+                        output=None,
+                        level="ERROR",
+                        status_message=last_error,
+                        usage={"total_tokens": 0},
+                    )
+                return None
+
+            data = resp.json()
+
+            # Check for OpenRouter error envelope
+            if "error" in data:
+                error_msg = data["error"].get("message", str(data["error"]))
+                last_error = f"API error: {error_msg}"
+                print(f"[{name}] OpenRouter {last_error}", flush=True)
+                if generation:
+                    generation.end(
+                        output=None,
+                        level="ERROR",
+                        status_message=last_error,
+                    )
+                return None
+
+            choices = data.get("choices", [])
+            if not choices:
+                last_error = "No choices in response"
+                print(f"[{name}] OpenRouter returned no choices", flush=True)
+                if generation:
+                    generation.end(
+                        output=None,
+                        level="WARNING",
+                        status_message=last_error,
+                    )
+                return None
+
+            text = choices[0].get("message", {}).get("content", "")
+            latency_ms = int((time.time() - start_time) * 1000)
+
+            # Extract token usage (OpenAI format)
+            usage_data = data.get("usage", {})
+            usage = {}
+            if usage_data:
+                usage = {
+                    "input": usage_data.get("prompt_tokens", 0),
+                    "output": usage_data.get("completion_tokens", 0),
+                    "total": usage_data.get("total_tokens", 0),
+                }
+
+            if generation:
+                generation.end(
+                    output=text[:2000],
+                    usage=usage or None,
+                    metadata={
+                        **(metadata or {}),
+                        "latency_ms": latency_ms,
+                        "attempt": attempt,
+                        "response_length": len(text),
+                        "model_actual": data.get("model", model),
+                    },
+                )
+
+            return text
+
+        except requests.exceptions.Timeout:
+            last_error = f"Timeout (attempt {attempt}/{max_retries})"
+            print(f"[{name}] OpenRouter {last_error}", flush=True)
+        except requests.exceptions.RequestException as e:
+            last_error = f"Request error: {e}"
+            print(f"[{name}] OpenRouter {last_error}", flush=True)
+            if generation:
+                generation.end(
+                    output=None,
+                    level="ERROR",
+                    status_message=last_error,
+                )
+            return None
+
+    # All retries exhausted
+    if generation:
+        generation.end(
+            output=None,
+            level="ERROR",
+            status_message=f"All {max_retries} retries exhausted. Last: {last_error}",
+        )
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Gemini (legacy — still works, but prefer OpenRouter for new code)
+# ---------------------------------------------------------------------------
 
 def traced_gemini_call(
     *,

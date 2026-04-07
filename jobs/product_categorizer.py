@@ -20,19 +20,18 @@ from urllib.parse import urlparse
 
 sys.path.insert(0, "/app")
 from jobs.db import get_conn, put_conn
-from jobs.langfuse_wrapper import traced_gemini_call, flush as langfuse_flush
+from jobs.langfuse_wrapper import traced_openrouter_call, flush as langfuse_flush
 
 
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
 
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-GEMINI_MODEL = "gemini-2.5-flash"
-GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
+# OpenRouter model for classification ($0.03/M input, 131K ctx, good for structured output)
+OPENROUTER_MODEL = os.environ.get("CATEGORIZER_MODEL", "mistralai/mistral-small-3.1-24b-instruct")
 
 BATCH_SIZE = 1000
-AI_BATCH_SIZE = 100  # products per Gemini API call
+AI_BATCH_SIZE = 100  # products per API call
 AI_MAX_RETRIES = 3
 AI_RETRY_DELAY = 2  # seconds
 
@@ -442,29 +441,33 @@ def categorize_by_shop_mapping(products):
 # Signal 4: AI classification (Gemini Flash)
 # ---------------------------------------------------------------------------
 
-def _call_gemini_traced(prompt, batch_num=0, total_batches=0, batch_size=0):
-    """Call Gemini API with Langfuse tracing. Returns parsed JSON or None."""
-    if not GEMINI_API_KEY:
-        print("[categorizer] WARNING: GEMINI_API_KEY not set, skipping AI classification", flush=True)
-        return None
-
-    response_text = traced_gemini_call(
+def _call_ai_traced(prompt, batch_num=0, total_batches=0, batch_size=0):
+    """Call OpenRouter API with Langfuse tracing. Returns parsed JSON or None."""
+    response_text = traced_openrouter_call(
         name="product-categorization",
         prompt=prompt,
-        gemini_url=GEMINI_URL,
-        gemini_api_key=GEMINI_API_KEY,
-        model=GEMINI_MODEL,
+        model=OPENROUTER_MODEL,
         timeout=60,
         max_retries=AI_MAX_RETRIES,
+        json_mode=True,
         metadata={"batch": batch_num, "total_batches": total_batches, "batch_size": batch_size},
     )
     if not response_text:
         return None
 
     try:
-        return json.loads(response_text)
+        result = json.loads(response_text)
+        # Handle various response shapes: direct array, or wrapped in a key
+        if isinstance(result, list):
+            return result
+        if isinstance(result, dict):
+            # Try common wrapper keys
+            for key in ("results", "products", "classifications", "data"):
+                if key in result and isinstance(result[key], list):
+                    return result[key]
+        return None
     except (json.JSONDecodeError, ValueError) as e:
-        print(f"[categorizer] Gemini parse error: {e}", flush=True)
+        print(f"[categorizer] AI parse error: {e}", flush=True)
         return None
 
 
@@ -476,8 +479,8 @@ def categorize_by_ai(products, master_cats, slug_map):
     """
     if not products:
         return []
-    if not GEMINI_API_KEY:
-        print("[categorizer] No GEMINI_API_KEY — skipping AI classification for "
+    if not os.environ.get("OPENROUTER_API_KEY"):
+        print("[categorizer] No OPENROUTER_API_KEY — skipping AI classification for "
               f"{len(products)} products", flush=True)
         return []
 
@@ -518,7 +521,7 @@ Rules:
 Example output:
 [{{"product_id": 1, "category_id": 5, "confidence": 0.92}}]"""
 
-        result = _call_gemini_traced(
+        result = _call_ai_traced(
             prompt,
             batch_num=i // AI_BATCH_SIZE + 1,
             total_batches=(len(products) - 1) // AI_BATCH_SIZE + 1,
@@ -655,7 +658,7 @@ def run_product_categorizer(batch_size=BATCH_SIZE):
     print(f"  By product_type:   {stats['by_product_type']}", flush=True)
     print(f"  By URL breadcrumb: {stats['by_url']}", flush=True)
     print(f"  By shop mapping:   {stats['by_mapping']}", flush=True)
-    print(f"  By AI (Gemini):    {stats['by_ai']}", flush=True)
+    print(f"  By AI (OpenRouter): {stats['by_ai']}", flush=True)
     print(f"  Failed:            {stats['failed']}", flush=True)
     print(f"  Classification:    {total_classified}/{stats['total']} "
           f"({total_classified / max(stats['total'], 1) * 100:.1f}%)", flush=True)

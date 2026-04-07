@@ -16,7 +16,7 @@ Usage:
 
 Env vars:
     CRAWL4AI_URL    — base URL (default: http://crawl4ai:11235)
-    OPENAI_API_KEY  — for LLM extraction (required for schema-based extraction)
+    OPENROUTER_API_KEY — for LLM extraction via OpenRouter (required for schema-based extraction)
     CRAWL4AI_LLM_PROVIDER — LLM provider (default: openai/gpt-4o-mini)
 """
 import json
@@ -30,7 +30,8 @@ sys.path.insert(0, "/app")
 from jobs.langfuse_wrapper import traced_generation
 
 CRAWL4AI_URL = os.environ.get("CRAWL4AI_URL", "http://crawl4ai:11235").rstrip("/")
-LLM_PROVIDER = os.environ.get("CRAWL4AI_LLM_PROVIDER", "openai/gpt-4o-mini")
+# Mistral Small 3.1 24B — $0.03/M input (vs gpt-4o-mini $0.15/M), 131K context, good at extraction
+LLM_PROVIDER = os.environ.get("CRAWL4AI_LLM_PROVIDER", "mistralai/mistral-small-3.1-24b-instruct")
 
 MAX_RETRIES = 2
 TIMEOUT_SECONDS = 120

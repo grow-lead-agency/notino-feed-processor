@@ -17,20 +17,16 @@ import unicodedata
 
 sys.path.insert(0, "/app")
 from jobs.db import get_conn, put_conn
-from jobs.langfuse_wrapper import traced_gemini_call, flush as langfuse_flush
+from jobs.langfuse_wrapper import traced_openrouter_call, flush as langfuse_flush
 
 
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-GEMINI_MODEL = "gemini-2.5-flash"
-GEMINI_URL = (
-    f"https://generativelanguage.googleapis.com/v1beta/models/"
-    f"{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
-)
-GEMINI_TIMEOUT = 60
-GEMINI_MAX_RETRIES = 2
+# OpenRouter model for category mapping ($0.03/M input, 131K ctx, multilingual)
+OPENROUTER_MODEL = os.environ.get("CATEGORY_MAPPER_MODEL", "mistralai/mistral-small-3.1-24b-instruct")
+AI_TIMEOUT = 60
+AI_MAX_RETRIES = 2
 AI_BATCH_SIZE = 50
 AI_REVIEW_THRESHOLD = 0.8
 
@@ -355,8 +351,10 @@ def _parse_ai_response(text: str) -> list[dict]:
         result = json.loads(text)
         if isinstance(result, list):
             return result
-        if isinstance(result, dict) and "mappings" in result:
-            return result["mappings"]
+        if isinstance(result, dict):
+            for key in ("mappings", "results", "categories", "data"):
+                if key in result and isinstance(result[key], list):
+                    return result[key]
         return []
     except json.JSONDecodeError:
         # Try to extract JSON array from markdown code block
@@ -372,11 +370,11 @@ def _parse_ai_response(text: str) -> list[dict]:
 
 def ai_pass(master_cats: list[dict], unmatched_cats: dict) -> list[dict]:
     """
-    Use Gemini Flash to map categories not matched by rules.
+    Use OpenRouter (open-source models) to map categories not matched by rules.
     Batches into groups of AI_BATCH_SIZE.
     Returns list of mapping dicts.
     """
-    if not GEMINI_API_KEY:
+    if not os.environ.get("OPENROUTER_API_KEY"):
         return []
 
     # Build master taxonomy context (compact)
@@ -438,14 +436,13 @@ def ai_pass(master_cats: list[dict], unmatched_cats: dict) -> list[dict]:
         )
 
         print(f"[category_mapper] AI batch {batch_num}/{total_batches} ({len(batch)} cats)...", flush=True)
-        response_text = traced_gemini_call(
+        response_text = traced_openrouter_call(
             name="category-mapping",
             prompt=prompt,
-            gemini_url=GEMINI_URL,
-            gemini_api_key=GEMINI_API_KEY,
-            model=GEMINI_MODEL,
-            timeout=GEMINI_TIMEOUT,
-            max_retries=GEMINI_MAX_RETRIES,
+            model=OPENROUTER_MODEL,
+            timeout=AI_TIMEOUT,
+            max_retries=AI_MAX_RETRIES,
+            json_mode=True,
             metadata={"batch": batch_num, "total_batches": total_batches, "batch_size": len(batch)},
         )
         parsed = _parse_ai_response(response_text)
@@ -632,7 +629,7 @@ def add_to_review_queue(items: list[dict]) -> int:
                     }),
                     f"Mapped to master category {item['master_category_id']}",
                     item["confidence"],
-                    GEMINI_MODEL,
+                    OPENROUTER_MODEL,
                 ))
                 count += 1
             conn.commit()
@@ -705,7 +702,7 @@ def run_category_mapping() -> dict:
     review_items: list[dict] = []
 
     if total_unmatched > 0:
-        print("[category_mapper] --- AI pass (Gemini Flash) ---", flush=True)
+        print(f"[category_mapper] --- AI pass ({OPENROUTER_MODEL}) ---", flush=True)
         ai_mappings = ai_pass(master_cats, unmatched)
         print(f"[category_mapper] AI: {len(ai_mappings)} matched", flush=True)
 
@@ -740,7 +737,7 @@ def run_category_mapping() -> dict:
     print(f"\n{'=' * 60}", flush=True)
     print(f"Category Mapper DONE in {elapsed:.1f}s", flush=True)
     print(f"  Rule-based: {stats['rule_matched']}", flush=True)
-    print(f"  AI (Gemini): {stats['ai_matched']}", flush=True)
+    print(f"  AI (OpenRouter): {stats['ai_matched']}", flush=True)
     print(f"  Review queue: {stats['review_queue']}", flush=True)
     print(f"  Total mapped: {stats['total']}", flush=True)
 

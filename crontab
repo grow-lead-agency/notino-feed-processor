@@ -24,7 +24,8 @@
 
 # Sitemap Crawler v2 — universal URL discovery (ALL types: product, category, brand, blog, page, image)
 # Also writes product URLs to v1 queue for backward compat with jsonld_scraper
-0 */2 * * * flock -n /tmp/sitemap_crawler_v2.lock python /app/jobs/sitemap_crawler_v2.py >> /proc/1/fd/1 2>&1
+# TEMP: every hour at :20 for initial data fill, then switch back to 0 */2
+20 * * * * flock -n /tmp/sitemap_crawler_v2.lock python /app/jobs/sitemap_crawler_v2.py >> /proc/1/fd/1 2>&1
 
 # Hlídač Shopů API — every 4 hours (was 6h). CZ/SK price history.
 # Runs 2 flows: (1) price sync for CZ/SK hard/blocked shops → product_offers + offer_price_history,
@@ -56,17 +57,20 @@
 
 # ── SITEMAP URL TYPE SCRAPERS (dequeue from url_discovery_queue) ───
 
-# Brand page scraper — every 2h, batch 100 (Crawl4AI + HTTP fallback)
+# Brand page scraper — (Crawl4AI + HTTP fallback)
 # Dequeues url_type='brand' → shop_brand_pages, auto-matches to brands master
-30 */2 * * * flock -n /tmp/brand_page_scraper.lock python /app/jobs/brand_page_scraper.py >> /proc/1/fd/1 2>&1
+# TEMP: every hour at :35 for initial data fill, then switch to 30 */2
+35 * * * * flock -n /tmp/brand_page_scraper.lock python /app/jobs/brand_page_scraper.py >> /proc/1/fd/1 2>&1
 
-# Blog/article scraper — every 6h, batch 200 (Crawl4AI + HTTP fallback)
+# Blog/article scraper — (Crawl4AI + HTTP fallback)
 # Dequeues url_type='blog' → shop_blog_articles (topics, brand mentions, sentiment)
-0 */6 * * * flock -n /tmp/blog_scraper.lock python /app/jobs/blog_scraper.py >> /proc/1/fd/1 2>&1
+# TEMP: every hour at :40 for initial data fill, then switch to 0 */6
+40 * * * * flock -n /tmp/blog_scraper.lock python /app/jobs/blog_scraper.py >> /proc/1/fd/1 2>&1
 
-# CMS page scraper — every 4h, batch 200 (plain HTTP, shallow meta extraction)
+# CMS page scraper — (plain HTTP, shallow meta extraction)
 # Dequeues url_type='page' → shop_pages, classifies + routes to domain tables
-15 */4 * * * flock -n /tmp/cms_page_scraper.lock python /app/jobs/cms_page_scraper.py >> /proc/1/fd/1 2>&1
+# TEMP: every hour at :45 for initial data fill, then switch to 15 */4
+45 * * * * flock -n /tmp/cms_page_scraper.lock python /app/jobs/cms_page_scraper.py >> /proc/1/fd/1 2>&1
 
 # ── ENRICHMENT JOBS (DB-only, free) ────────────────────────────────
 

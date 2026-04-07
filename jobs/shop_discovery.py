@@ -14,6 +14,7 @@ import os
 import re
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urljoin, urlparse
 
 import requests
@@ -23,7 +24,8 @@ from jobs.db import get_conn, put_conn
 from jobs.crawl4ai_client import crawl4ai_scrape_html, crawl4ai_health
 
 
-MAX_SHOPS_PER_RUN = 100
+MAX_SHOPS_PER_RUN = 200
+MAX_CONCURRENT_WORKERS = 20
 
 # Page type → keywords (link text + URL path matching)
 PAGE_KEYWORDS = {
@@ -247,32 +249,33 @@ def save_discovery(shop_id: int, pages: dict[str, str | None], engine: str, link
 # ----------------------------------------------------------------------------
 # Per-shop
 # ----------------------------------------------------------------------------
-def process_shop(shop_id: int, name: str, url: str) -> int:
+def process_shop(shop_id: int, name: str, url: str, use_crawl4ai: bool = True) -> int:
     """Discover pages for one shop. Returns count of pages found."""
     base = url.rstrip("/")
     engine = "unknown"
+    html = None
 
-    # Try Crawl4AI first (renders JS)
-    html = crawl4ai_scrape_html(base, timeout=30)
-    if html:
-        engine = "crawl4ai"
-    else:
-        # Fallback: plain HTTP
-        try:
-            resp = requests.get(
-                base,
-                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
-                timeout=15,
-                allow_redirects=True,
-            )
-            if resp.status_code == 200 and len(resp.text) > 500:
-                html = resp.text
-                engine = "http"
-        except requests.RequestException:
-            pass
+    # HTTP first (fast, 85% of shops work with this)
+    try:
+        resp = requests.get(
+            base,
+            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
+            timeout=15,
+            allow_redirects=True,
+        )
+        if resp.status_code == 200 and len(resp.text) > 500:
+            html = resp.text
+            engine = "http"
+    except requests.RequestException:
+        pass
+
+    # Crawl4AI fallback (for JS-rendered sites)
+    if not html and use_crawl4ai:
+        html = crawl4ai_scrape_html(base, timeout=30)
+        if html:
+            engine = "crawl4ai"
 
     if not html:
-        print(f"  [{name}] Could not fetch homepage", flush=True)
         save_discovery(shop_id, {}, engine="failed", links_found=0)
         return 0
 
@@ -283,9 +286,7 @@ def process_shop(shop_id: int, name: str, url: str) -> int:
 
     if found:
         found_list = [f"{k}={v.split('/')[-1]}" for k, v in pages.items() if v]
-        print(f"  [{name}] Found {found} pages: {', '.join(found_list)}", flush=True)
-    else:
-        print(f"  [{name}] No pages found", flush=True)
+        print(f"  [{name}] {found} pages: {', '.join(found_list)}", flush=True)
 
     return found
 
@@ -298,21 +299,27 @@ def main() -> None:
     print(f"=== Shop Discovery starting at {time.strftime('%Y-%m-%d %H:%M:%S')} ===", flush=True)
 
     crawl4ai_up = crawl4ai_health()
-    print(f"Crawl4AI: {'UP' if crawl4ai_up else 'DOWN (HTTP fallback only)'}", flush=True)
+    print(f"Crawl4AI: {'UP' if crawl4ai_up else 'DOWN (HTTP only)'} | {MAX_CONCURRENT_WORKERS} workers | batch {MAX_SHOPS_PER_RUN}", flush=True)
 
     shops = get_shops_to_discover()
-    print(f"Processing {len(shops)} shops (max {MAX_SHOPS_PER_RUN}/run)", flush=True)
+    print(f"Processing {len(shops)} shops", flush=True)
 
     if not shops:
         print("No shops to discover. Done.", flush=True)
         return
 
     total_found = 0
-    for shop_id, name, url in shops:
-        try:
-            total_found += process_shop(shop_id, name, url)
-        except Exception as e:
-            print(f"  [{name}] Error: {e}", flush=True)
+
+    with ThreadPoolExecutor(max_workers=MAX_CONCURRENT_WORKERS) as executor:
+        futures = {
+            executor.submit(process_shop, sid, name, url, crawl4ai_up): name
+            for sid, name, url in shops
+        }
+        for future in as_completed(futures):
+            try:
+                total_found += future.result()
+            except Exception as e:
+                print(f"  [{futures[future]}] Error: {e}", flush=True)
 
     elapsed = time.time() - start_ts
     print(

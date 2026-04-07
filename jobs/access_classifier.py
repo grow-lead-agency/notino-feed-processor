@@ -20,6 +20,8 @@ Re-classification: shops older than 30 days get re-tested.
 import os
 import sys
 import time
+from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 
@@ -30,7 +32,8 @@ from jobs.crawl4ai_client import crawl4ai_scrape_html, crawl4ai_health
 FIRECRAWL_API_URL = "https://api.firecrawl.dev/v1/scrape"
 FIRECRAWL_API_KEY = os.environ.get("FIRECRAWL_API_KEY", "").strip()
 
-MAX_SHOPS_PER_RUN = 100
+MAX_SHOPS_PER_RUN = 200
+MAX_CONCURRENT_WORKERS = 20
 MIN_BODY_LENGTH = 1000  # bytes — anything less is likely a block page
 
 
@@ -193,10 +196,18 @@ def main() -> None:
         print("No shops to classify. Done.", flush=True)
         return
 
-    tier_counts = {}
-    for shop_id, name, url in shops:
-        tier = classify_shop(shop_id, name, url)
-        tier_counts[tier] = tier_counts.get(tier, 0) + 1
+    tier_counts = Counter()
+
+    with ThreadPoolExecutor(max_workers=MAX_CONCURRENT_WORKERS) as executor:
+        futures = {
+            executor.submit(classify_shop, sid, name, url): name
+            for sid, name, url in shops
+        }
+        for future in as_completed(futures):
+            try:
+                tier_counts[future.result()] += 1
+            except Exception as e:
+                print(f"  [{futures[future]}] Error: {e}", flush=True)
 
     elapsed = time.time() - start_ts
     summary = ", ".join(f"{t}={c}" for t, c in sorted(tier_counts.items()))

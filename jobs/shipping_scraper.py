@@ -466,7 +466,7 @@ def get_shops_to_scrape(limit: int = MAX_SHOPS_PER_RUN) -> list[tuple]:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT id, name, url, country_id
+                SELECT id, name, url, country_id, discovered_shipping_url
                 FROM shops
                 WHERE deleted_at IS NULL
                   AND url IS NOT NULL
@@ -475,9 +475,11 @@ def get_shops_to_scrape(limit: int = MAX_SHOPS_PER_RUN) -> list[tuple]:
                       OR shipping_checked_at < NOW() - INTERVAL '90 days'
                   )
                 ORDER BY
-                    shipping_checked_at IS NULL DESC,       -- never-checked first
-                    (offers_checked_at IS NOT NULL) DESC,   -- prefer active shops
-                    shipping_checked_at ASC NULLS FIRST     -- oldest check first
+                    -- prioritize shops with discovered URL (instant hit, no homepage scan)
+                    discovered_shipping_url IS NOT NULL DESC,
+                    shipping_checked_at IS NULL DESC,
+                    (offers_checked_at IS NOT NULL) DESC,
+                    shipping_checked_at ASC NULLS FIRST
                 LIMIT %s
                 """,
                 (limit,),
@@ -696,10 +698,22 @@ def process_shop(shop_row: tuple, country_map: dict[str, int], carrier_map: dict
     Process a single shop. Returns (zones_created, methods_created).
     Always marks shop as checked (even on failure) to avoid infinite retries.
     """
-    shop_id, name, url, _country_id = shop_row
-    print(f"[{name}] Discovering shipping page...", flush=True)
+    shop_id, name, url, _country_id, discovered_url = shop_row
 
-    source_url, data = find_shipping_page(url)
+    # Fast path: use pre-discovered URL from shop_discovery.py
+    source_url, data = None, None
+    if discovered_url:
+        print(f"[{name}] Using discovered URL: {discovered_url}", flush=True)
+        data = scrape_shipping(discovered_url)
+        if data and isinstance(data.get("zones"), list) and len(data["zones"]) > 0:
+            source_url = discovered_url
+        else:
+            data = None
+
+    # Slow path: scan homepage for shipping links
+    if not data:
+        print(f"[{name}] Discovering shipping page...", flush=True)
+        source_url, data = find_shipping_page(url)
     if not data:
         print(f"[{name}] No shipping data found — marking as checked", flush=True)
         mark_shop_checked(shop_id)

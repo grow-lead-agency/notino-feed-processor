@@ -37,13 +37,21 @@
 # ONLY job still using Firecrawl cloud (needs Fire-engine anti-bot).
 0 3,15 * * * python /app/jobs/firecrawl_scraper.py >> /proc/1/fd/1 2>&1
 
+# ── SHOP CLASSIFICATION & DISCOVERY ───────────────────────────────
+
+# Access tier classifier — daily 2 AM, batch 100. Waterfall: http→crawl4ai→firecrawl→blocked.
+0 2 * * * flock -n /tmp/access_classifier.lock python /app/jobs/access_classifier.py >> /proc/1/fd/1 2>&1
+
+# Shop page discovery — every 6h at :00, batch 100. Scans homepage for shipping/legal/returns/about/contact/FAQ.
+# Populates discovered_*_url columns on shops — used by shipping/legal scrapers as fast path.
+0 */6 * * * flock -n /tmp/shop_discovery.lock python /app/jobs/shop_discovery.py >> /proc/1/fd/1 2>&1
+
 # ── CRAWL4AI JOBS (self-hosted, Firecrawl fallback) ───────────────
 
-# Shipping scraper — every 6h, batch of 50 shops (Crawl4AI primary, Firecrawl fallback)
-# TODO: optimize URL candidate logic — filter by shop country/language before trying 30+ paths
+# Shipping scraper — every 6h at :15, batch 50. Uses discovered_shipping_url if available.
 15 */6 * * * flock -n /tmp/shipping_scraper.lock python /app/jobs/shipping_scraper.py >> /proc/1/fd/1 2>&1
 
-# Legal entity scraper — every 6h (+30m offset), batch of 50 shops
+# Legal entity scraper — every 6h at :45, batch 50. Uses discovered_legal_url if available.
 45 */6 * * * flock -n /tmp/legal_scraper.lock python /app/jobs/legal_scraper.py >> /proc/1/fd/1 2>&1
 
 # ── SITEMAP URL TYPE SCRAPERS (dequeue from url_discovery_queue) ───

@@ -652,7 +652,7 @@ def get_shops_to_scrape(limit: int = MAX_SHOPS_PER_RUN) -> list[tuple]:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT id, name, url, country_id
+                SELECT id, name, url, country_id, discovered_legal_url
                 FROM shops
                 WHERE deleted_at IS NULL
                   AND url IS NOT NULL
@@ -661,6 +661,7 @@ def get_shops_to_scrape(limit: int = MAX_SHOPS_PER_RUN) -> list[tuple]:
                       OR legal_checked_at < NOW() - INTERVAL '180 days'
                   )
                 ORDER BY
+                    discovered_legal_url IS NOT NULL DESC,
                     legal_checked_at IS NULL DESC,
                     (offers_checked_at IS NOT NULL) DESC,
                     legal_checked_at ASC NULLS FIRST
@@ -678,10 +679,25 @@ def get_shops_to_scrape(limit: int = MAX_SHOPS_PER_RUN) -> list[tuple]:
 # ----------------------------------------------------------------------------
 def process_shop(shop_row: tuple, country_map: dict[str, int]) -> int:
     """Returns 1 if legal_entity was created/linked, 0 otherwise."""
-    shop_id, name, url, country_id = shop_row
-    print(f"[{name}] Discovering imprint page...", flush=True)
+    shop_id, name, url, country_id, discovered_url = shop_row
 
-    source_url, data = find_imprint_page(url)
+    # Fast path: use pre-discovered URL from shop_discovery.py
+    source_url, data = None, None
+    if discovered_url:
+        print(f"[{name}] Using discovered URL: {discovered_url}", flush=True)
+        data = scrape_legal(discovered_url)
+        if data and isinstance(data, dict) and data.get("legal_name"):
+            if data.get("vat_id") or data.get("registration_number") or data.get("registered_address"):
+                source_url = discovered_url
+            else:
+                data = None
+        else:
+            data = None
+
+    # Slow path: scan homepage for legal links
+    if not data:
+        print(f"[{name}] Discovering imprint page...", flush=True)
+        source_url, data = find_imprint_page(url)
     if not data:
         print(f"[{name}] No legal data found — marking as checked", flush=True)
         mark_shop_checked(shop_id)

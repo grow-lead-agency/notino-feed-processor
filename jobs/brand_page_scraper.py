@@ -26,7 +26,7 @@ import structlog
 
 sys.path.insert(0, "/app")
 from jobs.db import get_conn, put_conn, normalize_title
-from jobs.crawl4ai_client import crawl4ai_scrape, crawl4ai_health
+from jobs.scrape_chain import scrape_with_chain
 from jobs.langfuse_wrapper import flush
 
 logger = structlog.get_logger()
@@ -263,39 +263,51 @@ def run(batch_size: int = DEFAULT_BATCH, dry_run: bool = False):
     urls = dequeue_brand_urls(batch_size)
     logger.info("dequeued", count=len(urls))
 
-    use_crawl4ai = crawl4ai_health()
     stats = {"processed": 0, "saved": 0, "skipped": 0, "errors": 0}
+    consecutive_skips = 0
+    MAX_CONSECUTIVE_SKIPS = 15  # if 15 in a row fail, stop — probably all from same blocked shop
 
     for row in urls:
         url = row["url"]
         try:
-            data = None
-
-            # Try Crawl4AI first (LLM extraction)
-            if use_crawl4ai:
-                data = crawl4ai_scrape(url, schema=BRAND_SCHEMA, prompt=BRAND_PROMPT, timeout=60)
-
-            # Fallback: plain HTTP meta extraction
-            if not data:
-                data = extract_meta_brand(url)
+            result = scrape_with_chain(
+                url, schema=BRAND_SCHEMA, prompt=BRAND_PROMPT,
+                priority=row.get("priority", 5),
+                html_extractor=extract_meta_brand,
+            )
+            data = result["data"]
+            engine = result["engine"]
 
             if not data or not data.get("brand_name"):
                 stats["skipped"] += 1
+                consecutive_skips += 1
                 if not dry_run:
-                    _mark_queue(row["id"], "skipped", "no_data_extracted")
-                logger.debug("skipped", url=url[:80])
+                    _mark_queue(row["id"], "skipped", f"no_data|engines_tried={engine or 'all'}")
+                if consecutive_skips >= MAX_CONSECUTIVE_SKIPS:
+                    logger.warning("consecutive_skip_limit", skips=consecutive_skips,
+                                  last_url=url[:80])
+                    # Mark remaining as skipped to avoid burning through queue
+                    if not dry_run:
+                        remaining = urls[urls.index(row) + 1:]
+                        for r in remaining:
+                            _mark_queue(r["id"], "skipped", "batch_abort_consecutive_fails")
+                        stats["skipped"] += len(remaining)
+                    break
                 continue
+
+            consecutive_skips = 0  # reset on success
 
             if dry_run:
                 logger.info("dry_run", url=url[:80], brand=data.get("brand_name"),
-                           products=data.get("product_count"))
+                           engine=engine, products=data.get("product_count"))
                 stats["processed"] += 1
                 continue
 
             entity_id = save_brand_page(row, data)
             if entity_id:
                 stats["saved"] += 1
-                logger.debug("saved", url=url[:80], brand=data.get("brand_name"), entity_id=entity_id)
+                logger.debug("saved", url=url[:80], brand=data.get("brand_name"),
+                            engine=engine, entity_id=entity_id)
             else:
                 stats["skipped"] += 1
 

@@ -28,7 +28,7 @@ import structlog
 
 sys.path.insert(0, "/app")
 from jobs.db import get_conn, put_conn
-from jobs.crawl4ai_client import crawl4ai_scrape, crawl4ai_health
+from jobs.scrape_chain import scrape_with_chain
 from jobs.langfuse_wrapper import flush
 
 logger = structlog.get_logger()
@@ -122,7 +122,6 @@ def extract_meta_blog(url: str) -> dict | None:
 
         # Article published time
         pub_time = soup.find("meta", attrs={"property": "article:published_time"})
-        mod_time = soup.find("meta", attrs={"property": "article:modified_time"})
 
         # Author
         author_meta = soup.find("meta", attrs={"name": "author"})
@@ -168,7 +167,7 @@ def parse_date(date_str: str | None) -> datetime | None:
     return None
 
 
-def detect_language(url: str, title: str | None) -> str | None:
+def detect_language(url: str) -> str | None:
     """Simple language detection from URL path."""
     lower = url.lower()
     if "/cs/" in lower or "/cz/" in lower or ".cz/" in lower:
@@ -205,7 +204,7 @@ def save_blog_article(queue_row: dict, data: dict) -> int | None:
         return None
 
     published_at = parse_date(data.get("published_date"))
-    language = detect_language(url, title)
+    language = detect_language(url)
     slug_match = re.search(r'/([^/]+?)(?:\.\w+)?$', url)
     slug = slug_match.group(1) if slug_match else None
 
@@ -288,29 +287,41 @@ def run(batch_size: int = DEFAULT_BATCH, dry_run: bool = False):
     urls = dequeue_blog_urls(batch_size)
     logger.info("dequeued", count=len(urls))
 
-    use_crawl4ai = crawl4ai_health()
     stats = {"processed": 0, "saved": 0, "skipped": 0, "errors": 0}
+    consecutive_skips = 0
+    MAX_CONSECUTIVE_SKIPS = 15
 
     for row in urls:
         url = row["url"]
         try:
-            data = None
-
-            if use_crawl4ai:
-                data = crawl4ai_scrape(url, schema=BLOG_SCHEMA, prompt=BLOG_PROMPT, timeout=60)
-
-            if not data:
-                data = extract_meta_blog(url)
+            result = scrape_with_chain(
+                url, schema=BLOG_SCHEMA, prompt=BLOG_PROMPT,
+                priority=row.get("priority", 5),
+                html_extractor=extract_meta_blog,
+            )
+            data = result["data"]
+            engine = result["engine"]
 
             if not data or not data.get("title"):
                 stats["skipped"] += 1
+                consecutive_skips += 1
                 if not dry_run:
-                    _mark_queue(row["id"], "skipped", "no_data_extracted")
+                    _mark_queue(row["id"], "skipped", f"no_data|engine={engine or 'all'}")
+                if consecutive_skips >= MAX_CONSECUTIVE_SKIPS:
+                    logger.warning("consecutive_skip_limit", skips=consecutive_skips)
+                    if not dry_run:
+                        remaining = urls[urls.index(row) + 1:]
+                        for r in remaining:
+                            _mark_queue(r["id"], "skipped", "batch_abort_consecutive_fails")
+                        stats["skipped"] += len(remaining)
+                    break
                 continue
+
+            consecutive_skips = 0
 
             if dry_run:
                 logger.info("dry_run", url=url[:80], title=data.get("title", "")[:60],
-                           topics=data.get("topics"), brands=data.get("brand_mentions"))
+                           engine=engine, topics=data.get("topics"))
                 stats["processed"] += 1
                 continue
 

@@ -224,11 +224,12 @@ def scrape_with_chain(
     if data:
         return {"data": data, "engine": "http"}
 
-    # Layer 3: Firecrawl (only high-priority)
-    if priority <= 3:
-        data = _try_firecrawl(url, schema, prompt)
-        if data:
-            return {"data": data, "engine": "firecrawl"}
+    # Layer 3: Firecrawl — DISABLED (no budget)
+    # TODO: re-enable when Firecrawl budget is allocated for URL-type scrapers
+    # if priority <= 3:
+    #     data = _try_firecrawl(url, schema, prompt)
+    #     if data:
+    #         return {"data": data, "engine": "firecrawl"}
 
     return {"data": None, "engine": None}
 

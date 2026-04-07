@@ -30,6 +30,7 @@ import requests as http_requests
 
 sys.path.insert(0, "/app")
 from jobs.db import get_conn, put_conn
+from jobs.langfuse_wrapper import traced_generation
 
 
 # ---------------------------------------------------------------------------
@@ -224,16 +225,18 @@ def firecrawl_extract_inci(url: str) -> list[str] | None:
     if not FIRECRAWL_API_KEY:
         return None
 
+    inci_prompt = (
+        "Extract the INCI (cosmetic ingredients) list from this product page. "
+        "Return individual ingredient names in uppercase INCI format. "
+        "If no ingredients list is found, return empty ingredients array and null ingredients_text."
+    )
+
     payload = {
         "url": url,
         "formats": ["json"],
         "jsonOptions": {
             "schema": INCI_EXTRACTION_SCHEMA,
-            "prompt": (
-                "Extract the INCI (cosmetic ingredients) list from this product page. "
-                "Return individual ingredient names in uppercase INCI format. "
-                "If no ingredients list is found, return empty ingredients array and null ingredients_text."
-            ),
+            "prompt": inci_prompt,
         },
         "onlyMainContent": True,
         "waitFor": 3000,
@@ -244,64 +247,84 @@ def firecrawl_extract_inci(url: str) -> list[str] | None:
         "Content-Type": "application/json",
     }
 
-    for attempt in range(FIRECRAWL_MAX_RETRIES + 1):
-        try:
-            resp = http_requests.post(
-                FIRECRAWL_API_URL,
-                headers=headers,
-                json=payload,
-                timeout=FIRECRAWL_TIMEOUT + 10,
-            )
-        except http_requests.RequestException as e:
-            if attempt < FIRECRAWL_MAX_RETRIES:
-                time.sleep(2 ** attempt)
-                continue
-            print(f"  [firecrawl] Network error for {url}: {e}", flush=True)
+    with traced_generation(
+        name="firecrawl-ingredient",
+        model="firecrawl/extract",
+        input_data={"url": url, "prompt": inci_prompt},
+        metadata={"job": "ingredient_extractor"},
+        tags=["feed-processor", "firecrawl", "ingredient"],
+    ) as gen:
+        for attempt in range(FIRECRAWL_MAX_RETRIES + 1):
+            try:
+                resp = http_requests.post(
+                    FIRECRAWL_API_URL,
+                    headers=headers,
+                    json=payload,
+                    timeout=FIRECRAWL_TIMEOUT + 10,
+                )
+            except http_requests.RequestException as e:
+                if attempt < FIRECRAWL_MAX_RETRIES:
+                    time.sleep(2 ** attempt)
+                    continue
+                print(f"  [firecrawl] Network error for {url}: {e}", flush=True)
+                gen.end(level="ERROR", status_message=f"Network error: {e}")
+                return None
+
+            if resp.status_code == 429:
+                if attempt < FIRECRAWL_MAX_RETRIES:
+                    wait = int(resp.headers.get("Retry-After", 2 ** (attempt + 2)))
+                    time.sleep(min(wait, 30))
+                    continue
+                gen.end(level="ERROR", status_message="429 rate limited, retries exhausted")
+                return None
+
+            if resp.status_code in (403, 404):
+                gen.end(level="WARNING", status_message=f"HTTP {resp.status_code}")
+                return None
+
+            if resp.status_code >= 500:
+                if attempt < FIRECRAWL_MAX_RETRIES:
+                    time.sleep(2 ** attempt)
+                    continue
+                gen.end(level="ERROR", status_message=f"HTTP {resp.status_code} after retries")
+                return None
+
+            if resp.status_code != 200:
+                gen.end(level="WARNING", status_message=f"HTTP {resp.status_code}")
+                return None
+
+            try:
+                body = resp.json()
+            except ValueError:
+                gen.end(level="ERROR", status_message="Invalid JSON response")
+                return None
+
+            if not body.get("success"):
+                gen.end(level="WARNING", status_message="Firecrawl success=false")
+                return None
+
+            data = (body.get("data") or {}).get("json") or {}
+            raw_ingredients = data.get("ingredients") or []
+            raw_text = data.get("ingredients_text")
+
+            # If AI returned raw text but empty list, try parsing ourselves
+            if not raw_ingredients and raw_text:
+                result = parse_inci(raw_text) or None
+                gen.end(output={"source": "parsed_text", "count": len(result) if result else 0}, usage={"total": 1})
+                return result
+
+            # Normalize AI-returned names
+            if raw_ingredients:
+                cleaned = [i.strip().upper() for i in raw_ingredients if isinstance(i, str) and len(i.strip()) >= 2]
+                result = cleaned if len(cleaned) >= 3 else None
+                gen.end(output={"source": "ai_extracted", "count": len(result) if result else 0}, usage={"total": 1})
+                return result
+
+            gen.end(output={"source": "none", "count": 0}, usage={"total": 1})
             return None
 
-        if resp.status_code == 429:
-            if attempt < FIRECRAWL_MAX_RETRIES:
-                wait = int(resp.headers.get("Retry-After", 2 ** (attempt + 2)))
-                time.sleep(min(wait, 30))
-                continue
-            return None
-
-        if resp.status_code in (403, 404):
-            return None
-
-        if resp.status_code >= 500:
-            if attempt < FIRECRAWL_MAX_RETRIES:
-                time.sleep(2 ** attempt)
-                continue
-            return None
-
-        if resp.status_code != 200:
-            return None
-
-        try:
-            body = resp.json()
-        except ValueError:
-            return None
-
-        if not body.get("success"):
-            return None
-
-        data = (body.get("data") or {}).get("json") or {}
-        raw_ingredients = data.get("ingredients") or []
-        raw_text = data.get("ingredients_text")
-
-        # If AI returned raw text but empty list, try parsing ourselves
-        if not raw_ingredients and raw_text:
-            return parse_inci(raw_text) or None
-
-        # Normalize AI-returned names
-        if raw_ingredients:
-            cleaned = [i.strip().upper() for i in raw_ingredients if isinstance(i, str) and len(i.strip()) >= 2]
-            return cleaned if len(cleaned) >= 3 else None
-
+        gen.end(level="ERROR", status_message="All retries exhausted")
         return None
-
-    return None
 
 
 # ---------------------------------------------------------------------------

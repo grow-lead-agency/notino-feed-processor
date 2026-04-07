@@ -31,7 +31,9 @@ LANGFUSE_SECRET_KEY = os.environ.get("LANGFUSE_SECRET_KEY", "")
 
 # Cost per 1M tokens (fallback when Langfuse doesn't have cost data)
 MODEL_COSTS = {
-    # OpenRouter models (current — cheap open-source)
+    # OpenRouter models (current — production)
+    "google/gemma-4-26b-a4b-it": {"input": 0.13, "output": 0.40},
+    "google/gemma-4-31b-it": {"input": 0.14, "output": 0.40},
     "google/gemma-3-27b-it:free": {"input": 0.0, "output": 0.0},
     "google/gemma-3-27b-it": {"input": 0.08, "output": 0.16},
     "google/gemma-3-12b-it:free": {"input": 0.0, "output": 0.0},

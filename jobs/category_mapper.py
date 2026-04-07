@@ -24,7 +24,7 @@ from jobs.langfuse_wrapper import traced_openrouter_call, flush as langfuse_flus
 # Config
 # ---------------------------------------------------------------------------
 # OpenRouter model for category mapping ($0.03/M input, 131K ctx, multilingual)
-OPENROUTER_MODEL = os.environ.get("CATEGORY_MAPPER_MODEL", "mistralai/mistral-small-3.1-24b-instruct")
+OPENROUTER_MODEL = os.environ.get("CATEGORY_MAPPER_MODEL", "google/gemma-4-26b-a4b-it")
 AI_TIMEOUT = 60
 AI_MAX_RETRIES = 2
 AI_BATCH_SIZE = 50
@@ -436,13 +436,15 @@ def ai_pass(master_cats: list[dict], unmatched_cats: dict) -> list[dict]:
         )
 
         print(f"[category_mapper] AI batch {batch_num}/{total_batches} ({len(batch)} cats)...", flush=True)
+        # Gemma models break with json_mode (return single object instead of array)
+        # — use raw mode and parse markdown ```json``` code blocks
         response_text = traced_openrouter_call(
             name="category-mapping",
             prompt=prompt,
             model=OPENROUTER_MODEL,
             timeout=AI_TIMEOUT,
             max_retries=AI_MAX_RETRIES,
-            json_mode=True,
+            json_mode=False,
             metadata={"batch": batch_num, "total_batches": total_batches, "batch_size": len(batch)},
         )
         parsed = _parse_ai_response(response_text)

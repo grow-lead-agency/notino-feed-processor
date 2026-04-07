@@ -30,6 +30,7 @@ import requests
 
 sys.path.insert(0, "/app")
 from jobs.db import get_conn, put_conn
+from jobs.langfuse_wrapper import traced_generation
 
 
 # ---------------------------------------------------------------------------
@@ -134,7 +135,7 @@ REVIEW_EXTRACTION_PROMPT = (
 # Firecrawl helpers
 # ---------------------------------------------------------------------------
 def firecrawl_scrape(url: str) -> dict | None:
-    """Call Firecrawl /v1/scrape with review extraction schema. Returns JSON or None."""
+    """Call Firecrawl /v1/scrape with review extraction schema. Traced via Langfuse."""
     if not FIRECRAWL_API_KEY:
         print("[reviews] FATAL: FIRECRAWL_API_KEY missing", flush=True)
         return None
@@ -156,53 +157,70 @@ def firecrawl_scrape(url: str) -> dict | None:
         "Content-Type": "application/json",
     }
 
-    for attempt in range(FIRECRAWL_MAX_RETRIES + 1):
-        try:
-            resp = requests.post(
-                FIRECRAWL_API_URL,
-                headers=headers,
-                json=payload,
-                timeout=FIRECRAWL_TIMEOUT_SECONDS + 10,
-            )
-        except requests.RequestException as e:
-            if attempt < FIRECRAWL_MAX_RETRIES:
-                time.sleep(2 ** attempt)
-                continue
-            print(f"[reviews] Network error for {url}: {e}", flush=True)
-            return None
+    with traced_generation(
+        name="firecrawl-reviews",
+        model="firecrawl/extract",
+        input_data={"url": url, "prompt": REVIEW_EXTRACTION_PROMPT},
+        metadata={"job": "review_harvester"},
+        tags=["feed-processor", "firecrawl", "reviews"],
+    ) as gen:
+        for attempt in range(FIRECRAWL_MAX_RETRIES + 1):
+            try:
+                resp = requests.post(
+                    FIRECRAWL_API_URL,
+                    headers=headers,
+                    json=payload,
+                    timeout=FIRECRAWL_TIMEOUT_SECONDS + 10,
+                )
+            except requests.RequestException as e:
+                if attempt < FIRECRAWL_MAX_RETRIES:
+                    time.sleep(2 ** attempt)
+                    continue
+                print(f"[reviews] Network error for {url}: {e}", flush=True)
+                gen.end(level="ERROR", status_message=f"Network error: {e}")
+                return None
 
-        if resp.status_code == 429:
-            if attempt < FIRECRAWL_MAX_RETRIES:
-                wait = int(resp.headers.get("Retry-After", 2 ** (attempt + 2)))
-                time.sleep(min(wait, 30))
-                continue
-            print(f"[reviews] Rate limited on {url}", flush=True)
-            return None
+            if resp.status_code == 429:
+                if attempt < FIRECRAWL_MAX_RETRIES:
+                    wait = int(resp.headers.get("Retry-After", 2 ** (attempt + 2)))
+                    time.sleep(min(wait, 30))
+                    continue
+                print(f"[reviews] Rate limited on {url}", flush=True)
+                gen.end(level="ERROR", status_message="429 rate limited, retries exhausted")
+                return None
 
-        if resp.status_code in (403, 404):
-            return None
+            if resp.status_code in (403, 404):
+                gen.end(level="WARNING", status_message=f"HTTP {resp.status_code}")
+                return None
 
-        if resp.status_code >= 500:
-            if attempt < FIRECRAWL_MAX_RETRIES:
-                time.sleep(2 ** attempt)
-                continue
-            return None
+            if resp.status_code >= 500:
+                if attempt < FIRECRAWL_MAX_RETRIES:
+                    time.sleep(2 ** attempt)
+                    continue
+                gen.end(level="ERROR", status_message=f"HTTP {resp.status_code} after retries")
+                return None
 
-        if resp.status_code != 200:
-            return None
+            if resp.status_code != 200:
+                gen.end(level="WARNING", status_message=f"HTTP {resp.status_code}")
+                return None
 
-        try:
-            body = resp.json()
-        except ValueError:
-            return None
+            try:
+                body = resp.json()
+            except ValueError:
+                gen.end(level="ERROR", status_message="Invalid JSON response")
+                return None
 
-        if not body.get("success"):
-            return None
+            if not body.get("success"):
+                gen.end(level="WARNING", status_message="Firecrawl success=false")
+                return None
 
-        data = body.get("data") or {}
-        return data.get("json")
+            data = body.get("data") or {}
+            result = data.get("json")
+            gen.end(output=result, usage={"total": 1})
+            return result
 
-    return None
+        gen.end(level="ERROR", status_message="All retries exhausted")
+        return None
 
 
 def _head_check(url: str) -> bool:

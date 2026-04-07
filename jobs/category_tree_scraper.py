@@ -28,6 +28,7 @@ import requests
 
 sys.path.insert(0, "/app")
 from jobs.db import get_conn, put_conn
+from jobs.langfuse_wrapper import traced_generation
 
 
 # ---------------------------------------------------------------------------
@@ -445,7 +446,7 @@ def _urls_to_categories(urls: list[str], base_url: str, base_domain: str) -> lis
 def extract_categories_from_firecrawl(shop_url: str) -> list[dict]:
     """
     Use Firecrawl /v1/map to get all URLs from a shop,
-    then filter for category-like pages.
+    then filter for category-like pages. Traced via Langfuse.
     """
     if not FIRECRAWL_API_KEY:
         print("  [firecrawl] FIRECRAWL_API_KEY missing — skipping", flush=True)
@@ -453,44 +454,60 @@ def extract_categories_from_firecrawl(shop_url: str) -> list[dict]:
 
     print(f"  [firecrawl] Calling /map for {shop_url}...", flush=True)
 
-    try:
-        resp = requests.post(
-            "https://api.firecrawl.dev/v1/map",
-            headers={
-                "Authorization": f"Bearer {FIRECRAWL_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "url": shop_url,
-                "limit": MAX_FIRECRAWL_URLS,
-            },
-            timeout=60,
+    with traced_generation(
+        name="firecrawl-category-map",
+        model="firecrawl/map",
+        input_data={"url": shop_url, "limit": MAX_FIRECRAWL_URLS},
+        metadata={"job": "category_tree_scraper"},
+        tags=["feed-processor", "firecrawl", "category-map"],
+    ) as gen:
+        try:
+            resp = requests.post(
+                "https://api.firecrawl.dev/v1/map",
+                headers={
+                    "Authorization": f"Bearer {FIRECRAWL_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "url": shop_url,
+                    "limit": MAX_FIRECRAWL_URLS,
+                },
+                timeout=60,
+            )
+        except requests.RequestException as e:
+            print(f"  [firecrawl] Network error: {e}", flush=True)
+            gen.end(level="ERROR", status_message=f"Network error: {e}")
+            return []
+
+        if resp.status_code != 200:
+            print(f"  [firecrawl] HTTP {resp.status_code}", flush=True)
+            gen.end(level="WARNING", status_message=f"HTTP {resp.status_code}")
+            return []
+
+        try:
+            body = resp.json()
+        except ValueError:
+            gen.end(level="ERROR", status_message="Invalid JSON response")
+            return []
+
+        links = body.get("links", [])
+        if not isinstance(links, list):
+            gen.end(level="WARNING", status_message="No links in response")
+            return []
+
+        print(f"  [firecrawl] Got {len(links)} URLs from /map", flush=True)
+
+        parsed_base = urlparse(shop_url)
+        base_domain = parsed_base.netloc
+
+        categories = _urls_to_categories(links, shop_url, base_domain)
+        print(f"  [firecrawl] Filtered to {len(categories)} category URLs", flush=True)
+
+        gen.end(
+            output={"total_urls": len(links), "category_urls": len(categories)},
+            usage={"total": 1},
         )
-    except requests.RequestException as e:
-        print(f"  [firecrawl] Network error: {e}", flush=True)
-        return []
-
-    if resp.status_code != 200:
-        print(f"  [firecrawl] HTTP {resp.status_code}", flush=True)
-        return []
-
-    try:
-        body = resp.json()
-    except ValueError:
-        return []
-
-    links = body.get("links", [])
-    if not isinstance(links, list):
-        return []
-
-    print(f"  [firecrawl] Got {len(links)} URLs from /map", flush=True)
-
-    parsed_base = urlparse(shop_url)
-    base_domain = parsed_base.netloc
-
-    categories = _urls_to_categories(links, shop_url, base_domain)
-    print(f"  [firecrawl] Filtered to {len(categories)} category URLs", flush=True)
-    return categories
+        return categories
 
 
 # ---------------------------------------------------------------------------

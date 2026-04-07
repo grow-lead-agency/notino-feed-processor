@@ -25,6 +25,7 @@ import requests
 
 sys.path.insert(0, "/app")
 from jobs.db import upsert_product_with_offer, get_conn
+from jobs.langfuse_wrapper import traced_generation, flush as langfuse_flush
 
 # ----------------------------------------------------------------------------
 # Config
@@ -96,10 +97,11 @@ def get_product_urls_from_sitemap(feed_url: str, limit: int = MAX_PRODUCTS_PER_S
 # ----------------------------------------------------------------------------
 # Firecrawl scrape call
 # ----------------------------------------------------------------------------
-def firecrawl_scrape(url: str) -> dict | None:
+def firecrawl_scrape(url: str, shop_name: str = "") -> dict | None:
     """
     POST to Firecrawl /v1/scrape with stealth proxy.
     Returns response `data` dict or None on failure.
+    All calls traced via Langfuse.
     """
     if not FIRECRAWL_API_KEY:
         print("[firecrawl] FATAL: FIRECRAWL_API_KEY env var missing", flush=True)
@@ -142,63 +144,82 @@ def firecrawl_scrape(url: str) -> dict | None:
         "Content-Type": "application/json",
     }
 
-    for attempt in range(FIRECRAWL_MAX_RETRIES + 1):
-        try:
-            resp = requests.post(
-                FIRECRAWL_API_URL,
-                headers=headers,
-                json=payload,
-                timeout=FIRECRAWL_TIMEOUT_SECONDS + 10,
+    with traced_generation(
+        name="firecrawl-product-scrape",
+        model="firecrawl/extract",
+        input_data={"url": url, "prompt": payload["jsonOptions"]["prompt"]},
+        metadata={"job": "firecrawl_scraper", "shop": shop_name},
+        tags=["feed-processor", "firecrawl", "product-scrape"],
+    ) as gen:
+        for attempt in range(FIRECRAWL_MAX_RETRIES + 1):
+            try:
+                resp = requests.post(
+                    FIRECRAWL_API_URL,
+                    headers=headers,
+                    json=payload,
+                    timeout=FIRECRAWL_TIMEOUT_SECONDS + 10,
+                )
+            except requests.RequestException as e:
+                if attempt < FIRECRAWL_MAX_RETRIES:
+                    time.sleep(2 ** attempt)
+                    continue
+                print(f"[firecrawl] Network error for {url}: {e}", flush=True)
+                gen.end(level="ERROR", status_message=f"Network error: {e}")
+                return None
+
+            # Retry on rate limit
+            if resp.status_code == 429:
+                if attempt < FIRECRAWL_MAX_RETRIES:
+                    wait = int(resp.headers.get("Retry-After", 2 ** (attempt + 2)))
+                    time.sleep(min(wait, 30))
+                    continue
+                print(f"[firecrawl] Rate limited (429) — giving up on {url}", flush=True)
+                gen.end(level="ERROR", status_message="429 rate limited, retries exhausted")
+                return None
+
+            # Skip on client errors (403 / 404 — page gone or uncrackable)
+            if resp.status_code in (403, 404):
+                gen.end(level="WARNING", status_message=f"HTTP {resp.status_code}")
+                return None
+
+            # Retry transient 5xx
+            if resp.status_code >= 500:
+                if attempt < FIRECRAWL_MAX_RETRIES:
+                    time.sleep(2 ** attempt)
+                    continue
+                gen.end(level="ERROR", status_message=f"HTTP {resp.status_code} after retries")
+                return None
+
+            if resp.status_code != 200:
+                gen.end(level="WARNING", status_message=f"HTTP {resp.status_code}")
+                return None
+
+            try:
+                body = resp.json()
+            except ValueError:
+                gen.end(level="ERROR", status_message="Invalid JSON response")
+                return None
+
+            if not body.get("success"):
+                gen.end(level="WARNING", status_message="Firecrawl success=false")
+                return None
+
+            data = body.get("data") or {}
+            # Track cost
+            credits = body.get("creditsUsed") or data.get("metadata", {}).get("creditsUsed") or 1
+            try:
+                _budget_add_credits(int(credits))
+            except (TypeError, ValueError):
+                _budget_add_credits(1)
+
+            gen.end(
+                output={"url": url, "has_json": bool(data.get("json")), "has_html": bool(data.get("html"))},
+                usage={"total": int(credits) if isinstance(credits, (int, float)) else 1},
             )
-        except requests.RequestException as e:
-            if attempt < FIRECRAWL_MAX_RETRIES:
-                time.sleep(2 ** attempt)
-                continue
-            print(f"[firecrawl] Network error for {url}: {e}", flush=True)
-            return None
+            return data
 
-        # Retry on rate limit
-        if resp.status_code == 429:
-            if attempt < FIRECRAWL_MAX_RETRIES:
-                wait = int(resp.headers.get("Retry-After", 2 ** (attempt + 2)))
-                time.sleep(min(wait, 30))
-                continue
-            print(f"[firecrawl] Rate limited (429) — giving up on {url}", flush=True)
-            return None
-
-        # Skip on client errors (403 / 404 — page gone or uncrackable)
-        if resp.status_code in (403, 404):
-            return None
-
-        # Retry transient 5xx
-        if resp.status_code >= 500:
-            if attempt < FIRECRAWL_MAX_RETRIES:
-                time.sleep(2 ** attempt)
-                continue
-            return None
-
-        if resp.status_code != 200:
-            return None
-
-        try:
-            body = resp.json()
-        except ValueError:
-            return None
-
-        if not body.get("success"):
-            return None
-
-        data = body.get("data") or {}
-        # Track cost
-        credits = body.get("creditsUsed") or data.get("metadata", {}).get("creditsUsed") or 1
-        try:
-            _budget_add_credits(int(credits))
-        except (TypeError, ValueError):
-            _budget_add_credits(1)
-
-        return data
-
-    return None
+        gen.end(level="ERROR", status_message="All retries exhausted")
+        return None
 
 
 # ----------------------------------------------------------------------------
@@ -332,7 +353,7 @@ def parse_ai_extraction(json_data: dict, url: str) -> dict | None:
     }
 
 
-def extract_product(url: str) -> dict | None:
+def extract_product(url: str, shop_name: str = "") -> dict | None:
     """
     Fetch product page via Firecrawl.
     Primary: AI extraction via jsonOptions (works on JS SPAs).
@@ -341,7 +362,7 @@ def extract_product(url: str) -> dict | None:
     if not _budget_consume():
         return None
 
-    data = firecrawl_scrape(url)
+    data = firecrawl_scrape(url, shop_name=shop_name)
     if not data:
         return None
 
@@ -432,7 +453,7 @@ def scrape_shop(shop_id: int, domain: str, feed_url: str, country_id: int) -> in
     errors = 0
 
     with ThreadPoolExecutor(max_workers=MAX_CONCURRENT_WORKERS) as executor:
-        futures = {executor.submit(extract_product, url): url for url in urls}
+        futures = {executor.submit(extract_product, url, domain): url for url in urls}
         for future in as_completed(futures):
             try:
                 data = future.result()
@@ -518,6 +539,8 @@ def main() -> None:
         f"{elapsed:.1f}s ===",
         flush=True,
     )
+
+    langfuse_flush()
 
 
 if __name__ == "__main__":

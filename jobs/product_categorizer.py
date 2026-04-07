@@ -27,8 +27,8 @@ from jobs.langfuse_wrapper import traced_openrouter_call, flush as langfuse_flus
 # Config
 # ---------------------------------------------------------------------------
 
-# OpenRouter model for classification ($0.03/M input, 131K ctx, good for structured output)
-OPENROUTER_MODEL = os.environ.get("CATEGORIZER_MODEL", "mistralai/mistral-small-3.1-24b-instruct")
+# OpenRouter model for classification — Gemma 4 26B MoE: 90% accuracy on CZ/SK beauty categories
+OPENROUTER_MODEL = os.environ.get("CATEGORIZER_MODEL", "google/gemma-4-26b-a4b-it")
 
 BATCH_SIZE = 1000
 AI_BATCH_SIZE = 100  # products per API call
@@ -443,20 +443,29 @@ def categorize_by_shop_mapping(products):
 
 def _call_ai_traced(prompt, batch_num=0, total_batches=0, batch_size=0):
     """Call OpenRouter API with Langfuse tracing. Returns parsed JSON or None."""
+    # Gemma models break with json_mode (return single object instead of array)
+    # — use raw mode and parse markdown ```json``` code blocks
     response_text = traced_openrouter_call(
         name="product-categorization",
         prompt=prompt,
         model=OPENROUTER_MODEL,
         timeout=60,
         max_retries=AI_MAX_RETRIES,
-        json_mode=True,
+        json_mode=False,
         metadata={"batch": batch_num, "total_batches": total_batches, "batch_size": batch_size},
     )
     if not response_text:
         return None
 
+    # Strip markdown code block if present
+    text = response_text.strip()
+    if "```" in text:
+        m = re.search(r"```(?:json)?\s*([\[{][\s\S]*?[\]}])\s*```", text)
+        if m:
+            text = m.group(1)
+
     try:
-        result = json.loads(response_text)
+        result = json.loads(text)
         # Handle various response shapes: direct array, or wrapped in a key
         if isinstance(result, list):
             return result
@@ -466,8 +475,15 @@ def _call_ai_traced(prompt, batch_num=0, total_batches=0, batch_size=0):
                 if key in result and isinstance(result[key], list):
                     return result[key]
         return None
-    except (json.JSONDecodeError, ValueError) as e:
-        print(f"[categorizer] AI parse error: {e}", flush=True)
+    except (json.JSONDecodeError, ValueError):
+        # Fallback: extract array via regex
+        m = re.search(r"\[[\s\S]*\]", response_text)
+        if m:
+            try:
+                return json.loads(m.group(0))
+            except (json.JSONDecodeError, ValueError):
+                pass
+        print(f"[categorizer] AI parse error: {response_text[:200]}", flush=True)
         return None
 
 

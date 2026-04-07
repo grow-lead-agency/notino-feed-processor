@@ -25,6 +25,7 @@ from lxml import etree
 
 sys.path.insert(0, "/app")
 from jobs.db import get_conn, put_conn, upsert_product_with_offer
+from jobs.langfuse_wrapper import traced_generation, flush as langfuse_flush
 
 # ---------------------------------------------------------------------------
 # Config
@@ -125,7 +126,7 @@ def _is_product_url(url: str) -> bool:
 # ---------------------------------------------------------------------------
 # Firecrawl scrape (PAID — rate limited)
 # ---------------------------------------------------------------------------
-def _firecrawl_scrape_page(url: str) -> dict | None:
+def _firecrawl_scrape_page(url: str, shop_name: str = "") -> dict | None:
     """Scrape a single product page via Firecrawl API. Returns data dict or None."""
     if not FIRECRAWL_API_KEY:
         print("  [firecrawl] FATAL: FIRECRAWL_API_KEY not set", flush=True)
@@ -166,53 +167,71 @@ def _firecrawl_scrape_page(url: str) -> dict | None:
         "Content-Type": "application/json",
     }
 
-    for attempt in range(FIRECRAWL_MAX_RETRIES + 1):
-        try:
-            time.sleep(FIRECRAWL_RATE_LIMIT_DELAY)
-            resp = requests.post(
-                FIRECRAWL_API_URL,
-                headers=headers,
-                json=payload,
-                timeout=FIRECRAWL_TIMEOUT + 10,
-            )
-        except requests.RequestException as e:
-            if attempt < FIRECRAWL_MAX_RETRIES:
-                time.sleep(2 ** attempt)
-                continue
-            print(f"  [firecrawl] Network error for {url}: {e}", flush=True)
-            return None
+    with traced_generation(
+        name="firecrawl-price-check",
+        model="firecrawl/extract",
+        input_data={"url": url, "prompt": payload["jsonOptions"]["prompt"]},
+        metadata={"job": "smart_price_checker", "shop": shop_name},
+        tags=["feed-processor", "firecrawl", "price-check"],
+    ) as gen:
+        for attempt in range(FIRECRAWL_MAX_RETRIES + 1):
+            try:
+                time.sleep(FIRECRAWL_RATE_LIMIT_DELAY)
+                resp = requests.post(
+                    FIRECRAWL_API_URL,
+                    headers=headers,
+                    json=payload,
+                    timeout=FIRECRAWL_TIMEOUT + 10,
+                )
+            except requests.RequestException as e:
+                if attempt < FIRECRAWL_MAX_RETRIES:
+                    time.sleep(2 ** attempt)
+                    continue
+                print(f"  [firecrawl] Network error for {url}: {e}", flush=True)
+                gen.end(level="ERROR", status_message=f"Network error: {e}")
+                return None
 
-        if resp.status_code == 429:
-            if attempt < FIRECRAWL_MAX_RETRIES:
-                wait = int(resp.headers.get("Retry-After", 2 ** (attempt + 2)))
-                time.sleep(min(wait, 30))
-                continue
-            print(f"  [firecrawl] Rate limited — giving up on {url}", flush=True)
-            return None
+            if resp.status_code == 429:
+                if attempt < FIRECRAWL_MAX_RETRIES:
+                    wait = int(resp.headers.get("Retry-After", 2 ** (attempt + 2)))
+                    time.sleep(min(wait, 30))
+                    continue
+                print(f"  [firecrawl] Rate limited — giving up on {url}", flush=True)
+                gen.end(level="ERROR", status_message="429 rate limited, retries exhausted")
+                return None
 
-        if resp.status_code in (403, 404):
-            return None
+            if resp.status_code in (403, 404):
+                gen.end(level="WARNING", status_message=f"HTTP {resp.status_code}")
+                return None
 
-        if resp.status_code >= 500:
-            if attempt < FIRECRAWL_MAX_RETRIES:
-                time.sleep(2 ** attempt)
-                continue
-            return None
+            if resp.status_code >= 500:
+                if attempt < FIRECRAWL_MAX_RETRIES:
+                    time.sleep(2 ** attempt)
+                    continue
+                gen.end(level="ERROR", status_message=f"HTTP {resp.status_code} after retries")
+                return None
 
-        if resp.status_code != 200:
-            return None
+            if resp.status_code != 200:
+                gen.end(level="WARNING", status_message=f"HTTP {resp.status_code}")
+                return None
 
-        try:
-            body = resp.json()
-        except ValueError:
-            return None
+            try:
+                body = resp.json()
+            except ValueError:
+                gen.end(level="ERROR", status_message="Invalid JSON response")
+                return None
 
-        if not body.get("success"):
-            return None
+            if not body.get("success"):
+                gen.end(level="WARNING", status_message="Firecrawl success=false")
+                return None
 
-        return body.get("data") or {}
+            data = body.get("data") or {}
+            gen.end(output={"url": url, "has_json": bool(data.get("json")), "has_html": bool(data.get("html"))},
+                    usage={"total": 1})
+            return data
 
-    return None
+        gen.end(level="ERROR", status_message="All retries exhausted")
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -338,9 +357,9 @@ def _parse_jsonld_product(html: str, url: str) -> dict | None:
     return None
 
 
-def _extract_product_from_firecrawl(url: str) -> dict | None:
+def _extract_product_from_firecrawl(url: str, shop_name: str = "") -> dict | None:
     """Scrape product page via Firecrawl. Try AI extraction, fallback to JSON-LD."""
-    data = _firecrawl_scrape_page(url)
+    data = _firecrawl_scrape_page(url, shop_name=shop_name)
     if not data:
         return None
 
@@ -589,7 +608,7 @@ def price_check_top_n(shop_id: int, shop_name: str, country_id: int,
         url = offer["product_url"]
         old_price = float(offer["price"]) if offer["price"] is not None else None
 
-        product_data = _extract_product_from_firecrawl(url)
+        product_data = _extract_product_from_firecrawl(url, shop_name=shop_name)
         if not product_data or product_data.get("price") is None:
             results.append({
                 "offer_id": offer["id"],
@@ -654,7 +673,7 @@ def handle_new_products(shop_id: int, shop_name: str, country_id: int,
     errors = 0
 
     for i, url in enumerate(urls_to_scrape, 1):
-        product_data = _extract_product_from_firecrawl(url)
+        product_data = _extract_product_from_firecrawl(url, shop_name=shop_name)
         if not product_data or not product_data.get("name") or product_data.get("price") is None:
             errors += 1
             continue
@@ -801,6 +820,7 @@ def run_smart_price_check(top_n: int = DEFAULT_TOP_N) -> dict:
     print(f"  Estimated cost:     ${cost}", flush=True)
     print(f"{'=' * 60}", flush=True)
 
+    langfuse_flush()
     return stats
 
 

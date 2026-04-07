@@ -24,6 +24,7 @@ Běží na Coolify (growlead-node-03). Zapisuje do Neon PG `notino-datamining`.
 | Shipping scraper | `jobs/shipping_scraper.py` | hodinově :15 | Scrape shipping info stránek — extrahuje shipping_zones + shipping_methods. Engine: Crawl4AI → Firecrawl fallback. Batch 50 shopů/run. |
 | Legal scraper | `jobs/legal_scraper.py` | hodinově :45 | Scrape imprint stránek — extrahuje legal_name, VAT ID, IČO. Engine: Crawl4AI → Firecrawl fallback. Batch 50 shopů/run. |
 | Sitemap diff | integrováno v sitemap_crawler | denně | Detekuje nové/smazané produkty |
+| Langfuse exporter | `jobs/langfuse_exporter.py` | */15 min | Exportuje AI cost data z Langfuse API → `ai_cost_log` tabulka pro Grafana |
 
 ## Deploy
 
@@ -48,7 +49,7 @@ curl -s "$COOLIFY_API_URL/api/v1/deploy?uuid=rtgj2inqwjjsms4ifgfh5a05" \
 | `AWIN_API_KEY` | Awin publisher API key (prázdný, čeká na registraci) |
 | `FIRECRAWL_API_KEY` | Firecrawl API key pro hard/protected shopy (CF challenge, DataDome) — fallback only |
 | `CRAWL4AI_URL` | Crawl4AI self-hosted URL (default: `http://crawl4ai:11235`) — primary scraping engine |
-| `OPENAI_API_KEY` | OpenAI API key pro Crawl4AI LLM extraction (gpt-4o-mini) |
+| `OPENROUTER_API_KEY` | OpenRouter API key pro Crawl4AI LLM extraction (gpt-4o-mini) |
 | `GEMINI_API_KEY` | Google Gemini API key pro category mapper + product categorizer |
 | `LANGFUSE_PUBLIC_KEY` | Langfuse public key (z langfuse.growlead.cz) |
 | `LANGFUSE_SECRET_KEY` | Langfuse secret key |
